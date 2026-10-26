@@ -57,6 +57,10 @@ The selection and quality logic is environment-independent. Environment identity
 not affect profile decisions; only metadata, confirmed declarative business rules, and relationships may do
 so.
 
+Cross-field and lifecycle rules should be inferred from table descriptions, column signatures, relationship
+targets, choice defaults, and option metadata. Exact logical-name profiles are a last resort, not the core
+dispatch mechanism.
+
 Vocabulary lives in `references/seed-data/` (`company-names.txt` ~6000 generated names, `company-sectors.txt`,
 `street-names.txt`, `job-titles.txt`, `departments.txt`, `locations.psv` with city/state/postal/phone masks
 and legal suffixes per country). Regenerate company names with `python scripts\generate_seed_data.py`.
@@ -77,10 +81,15 @@ GET /api/data/v9.2/EntityDefinitions(LogicalName='<table>')/Attributes/
     ?$select=LogicalName&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)
 ```
 
-If an option set has a "Default/Inactive" value that shouldn't be used for new test records (e.g., a
-"Closed" status), prefer values flagged as open/active where that distinction exists in the metadata
-(`State` transitions). When ambiguous, default to the first non-deprecated option and note the choice in
-the preview.
+Use `DefaultFormValue` when it identifies a valid option. Otherwise evaluate all available localized labels
+and avoid inactive/deprecated/retired options. Never assume a numeric option value has the same meaning in
+another environment. State/status lifecycle actions must store the live metadata-derived column/value pair
+in the workbook.
+
+If a required attribute type is not supported (for example, a PartyList, multi-select choice, file, or
+image), never omit it silently. `SystemRequired` is a discovery blocker. `ApplicationRequired` is retained
+as an approval warning because Dataverse frequently marks UI-required activity fields that the server does
+not enforce; the approved single-record probe determines whether the environment enforces it.
 
 ## 3. Alternate keys and natural uniqueness
 

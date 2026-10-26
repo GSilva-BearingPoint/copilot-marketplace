@@ -27,6 +27,7 @@ from discover_testdata_workbook import (
 )
 from progress import progress_message
 from quality_profile import build_quality_profile
+from realistic_data import table_kind
 from summarize_testdata_workbook import summarize
 from testdata_common import generate_records
 import validate_testdata_workbook
@@ -84,9 +85,22 @@ class FakeOData:
                     "LogicalName": raw["LogicalName"],
                     "OptionSet": raw.get("OptionSet"),
                     "GlobalOptionSet": raw.get("GlobalOptionSet"),
+                    "DefaultFormValue": raw.get("DefaultFormValue"),
                 }
                 for raw in self.schemas[table_name]["columns"]
                 if raw.get("AttributeType") == "Picklist"
+            ]
+            return FakeResponse({"value": choices})
+        if "StateAttributeMetadata" in url or "StatusAttributeMetadata" in url:
+            attr_type = "State" if "StateAttributeMetadata" in url else "Status"
+            choices = [
+                {
+                    "LogicalName": raw["LogicalName"],
+                    "OptionSet": raw.get("OptionSet"),
+                    "DefaultFormValue": raw.get("DefaultFormValue"),
+                }
+                for raw in self.schemas[table_name]["columns"]
+                if raw.get("AttributeType") == attr_type
             ]
             return FakeResponse({"value": choices})
         if "/Attributes" not in url:
@@ -190,6 +204,30 @@ def table_schema(
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_table_kind_precedence_uses_metadata_phrases(self) -> None:
+        organization = {
+            "logical_name": "x_a",
+            "display_name": "Customer",
+            "description": "Business that represents a customer or potential customer.",
+            "columns": [{"logical_name": "x_people", "role": "employees"}],
+        }
+        lead = {
+            "logical_name": "x_b",
+            "display_name": "Prospect",
+            "description": "Prospect or potential sales opportunity. Leads are converted when qualified.",
+            "columns": [{"logical_name": "x_revenue", "role": "revenue"}],
+        }
+        opportunity = {
+            "logical_name": "x_c",
+            "display_name": "Deal",
+            "description": "Potential revenue-generating event tracked through a sales process.",
+            "columns": [],
+        }
+
+        self.assertEqual("organization", table_kind(organization))
+        self.assertEqual("lead", table_kind(lead))
+        self.assertEqual("opportunity", table_kind(opportunity))
+
     def test_solution_components_expand_to_unique_table_names(self) -> None:
         class SolutionOData:
             api = "https://metadata.invalid/api/data/v9.2"
@@ -655,6 +693,29 @@ class DiscoveryTests(unittest.TestCase):
                 }
             ]
         }
+        state = column("statecode", attr_type="State")
+        state["OptionSet"] = {
+            "Options": [
+                {
+                    "Value": 0,
+                    "Label": {"UserLocalizedLabel": {"Label": "Active"}},
+                },
+                {
+                    "Value": 1,
+                    "Label": {"UserLocalizedLabel": {"Label": "Draft"}},
+                },
+            ]
+        }
+        status = column("statuscode", attr_type="Status")
+        status["OptionSet"] = {
+            "Options": [
+                {
+                    "Value": 1,
+                    "State": 0,
+                    "Label": {"UserLocalizedLabel": {"Label": "Active"}},
+                }
+            ]
+        }
         schemas = {
             "product": table_schema(
                 "product",
@@ -662,6 +723,8 @@ class DiscoveryTests(unittest.TestCase):
                     column("name", required="ApplicationRequired"),
                     column("productnumber", required="ApplicationRequired"),
                     structure,
+                    state,
+                    status,
                 ],
                 primary_name="name",
             ),
@@ -674,6 +737,7 @@ class DiscoveryTests(unittest.TestCase):
                     column("productid", attr_type="Lookup", required="ApplicationRequired"),
                 ],
                 primary_name="opportunityproductname",
+                description="Association between an opportunity and a product.",
                 relationships=[
                     {
                         "ReferencingEntity": "opportunityproduct",
@@ -693,7 +757,9 @@ class DiscoveryTests(unittest.TestCase):
         )
         by_name = {table["logical_name"]: table for table in plan["tables"]}
 
-        self.assertEqual("set_state", by_name["product"]["post_create_actions"][0]["kind"])
+        action = by_name["product"]["post_create_actions"][0]
+        self.assertEqual("set_state", action["kind"])
+        self.assertEqual({"statecode": 0, "statuscode": 1}, action["data"])
         opportunity_columns = {
             column["logical_name"] for column in by_name["opportunityproduct"]["columns"]
         }
@@ -767,6 +833,108 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn(" for ", records[0]["x7_caption"])
         self.assertIn("expected scope", records[0]["x7_narrative"])
         self.assertGreater(records[0]["x7_capacity"], 0)
+
+    def test_required_unsupported_type_is_an_explicit_blocker(self) -> None:
+        schemas = {
+            "x7_item": table_schema(
+                "x7_item",
+                [
+                    column("x7_name", required="ApplicationRequired"),
+                    column(
+                        "x7_tags",
+                        attr_type="MultiSelectPicklist",
+                        required="SystemRequired",
+                    ),
+                ],
+                primary_name="x7_name",
+            )
+        }
+
+        with self.assertRaisesRegex(ValueError, "MultiSelectPicklist"):
+            inspect_table(FakeClient(schemas), "x7_item", 1, False)
+
+    def test_relationship_semantics_work_without_standard_logical_names(self) -> None:
+        state = column("x_state", attr_type="State")
+        state["OptionSet"] = {
+            "Options": [
+                {
+                    "Value": 4,
+                    "Label": {
+                        "LocalizedLabels": [
+                            {"Label": "Actif"},
+                            {"Label": "Active"},
+                        ],
+                        "UserLocalizedLabel": {"Label": "Actif"},
+                    },
+                }
+            ]
+        }
+        status = column("x_status", attr_type="Status")
+        status["OptionSet"] = {
+            "Options": [
+                {
+                    "Value": 9,
+                    "State": 4,
+                    "Label": {"UserLocalizedLabel": {"Label": "Active"}},
+                }
+            ]
+        }
+        schemas = {
+            "x_catalogentry": table_schema(
+                "x_catalogentry",
+                [
+                    column("x_name", required="ApplicationRequired"),
+                    column("x_sku", description="Product number used in the catalog."),
+                    state,
+                    status,
+                ],
+                primary_name="x_name",
+                description="Products offered to customers.",
+            ),
+            "x_salesline": table_schema(
+                "x_salesline",
+                [
+                    column("x_name", required="ApplicationRequired"),
+                    column("x_catalogentrydescription"),
+                    column(
+                        "x_catalogentryid",
+                        attr_type="Lookup",
+                        required="ApplicationRequired",
+                    ),
+                ],
+                primary_name="x_name",
+                description="Association between a sales opportunity and a product.",
+                relationships=[
+                    {
+                        "ReferencingEntity": "x_salesline",
+                        "ReferencingAttribute": "x_catalogentryid",
+                        "ReferencedEntity": "x_catalogentry",
+                        "ReferencingEntityNavigationPropertyName": "x_catalogentryid_nav",
+                    }
+                ],
+            ),
+        }
+
+        plan = discover_plan(
+            FakeClient(schemas),
+            ["x_catalogentry", "x_salesline"],
+            1,
+            None,
+            "https://environment.invalid",
+        )
+        by_name = {table["logical_name"]: table for table in plan["tables"]}
+
+        self.assertEqual(
+            {"x_state": 4, "x_status": 9},
+            by_name["x_catalogentry"]["post_create_actions"][0]["data"],
+        )
+        self.assertNotIn(
+            "x_catalogentrydescription",
+            {
+                item["logical_name"]
+                for item in by_name["x_salesline"]["columns"]
+            },
+        )
 
 
 class WorkbookTests(unittest.TestCase):
@@ -1098,6 +1266,29 @@ class WorkbookTests(unittest.TestCase):
         self.assertTrue(all(0 < row["price"] <= 10000 for row in first))
         self.assertTrue(all(row["productstructure"] == 1 for row in first))
         self.assertEqual(3, len({row["name"] for row in first}))
+
+    def test_live_choice_default_precedes_label_heuristics(self) -> None:
+        table = {
+            "logical_name": "x_item",
+            "count": 1,
+            "columns": [
+                {
+                    "logical_name": "x_mode",
+                    "type": "Picklist",
+                    "default_value": 20,
+                    "options": [
+                        {"value": 10, "label": "Standard", "labels": ["Standard"]},
+                        {"value": 20, "label": "Environment Default", "labels": ["Environment Default"]},
+                    ],
+                }
+            ],
+            "context_rules": {},
+        }
+
+        self.assertEqual(
+            20,
+            generate_records(table, None, "choice-default")[0]["x_mode"],
+        )
 
     def test_deferred_cycle_hyperlinks_are_rendered_after_all_sheets_exist(self) -> None:
         schemas = {

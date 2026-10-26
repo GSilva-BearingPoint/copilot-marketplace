@@ -183,11 +183,11 @@ def validate(path: Path) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
                 )
                 continue
             data = action.get("data") or {}
-            if not isinstance(data.get("statecode"), int) or not isinstance(
-                data.get("statuscode"), int
+            if not data or any(
+                not isinstance(value, int) for value in data.values()
             ):
                 errors.append(
-                    f"{name}: set_state action requires integer statecode and statuscode."
+                    f"{name}: set_state action requires metadata-derived integer values."
                 )
     return rows_by_table, errors
 

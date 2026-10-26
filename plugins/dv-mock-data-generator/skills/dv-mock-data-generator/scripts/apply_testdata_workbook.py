@@ -3,15 +3,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import importlib
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
 
+from auth_loader import import_get_client
 from progress import emit_progress
 from testdata_common import INTERNAL_KEY
 from validate_testdata_workbook import load_metadata, validate
@@ -32,21 +31,6 @@ def require_delegated_auth() -> None:
             "This workflow only accepts user-delegated authentication configured by "
             f"the Microsoft dv-connect skill. Remove: {', '.join(configured)}."
         )
-
-
-def import_get_client():
-    candidates = [
-        Path(os.environ["DV_TESTDATA_AUTH_DIR"]) if os.environ.get("DV_TESTDATA_AUTH_DIR") else None,
-        Path.cwd() / "scripts",
-        Path.home() / ".copilot" / "installed-plugins" / "awesome-copilot" / "dataverse" / "scripts",
-    ]
-    for candidate in candidates:
-        if candidate and (candidate / "auth.py").exists():
-            sys.path.insert(0, str(candidate))
-            return importlib.import_module("auth").get_client
-    raise RuntimeError(
-        "auth.py was not found. Set DV_TESTDATA_AUTH_DIR to the Dataverse plugin scripts folder."
-    )
 
 
 def serializable(value: Any) -> Any:

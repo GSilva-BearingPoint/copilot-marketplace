@@ -282,32 +282,48 @@ def _choice_value(column: dict[str, Any], index: int) -> Any:
         raise ValueError(
             f"Choice column {column['logical_name']} has no valid options in the plan."
         )
-    preferred_labels = {
-        "productstructure": ("product",),
-        "pricingmethodcode": ("currency amount", "amount"),
-        "quantitysellingcode": ("no control", "whole"),
-        "roundingpolicycode": ("none", "no rounding"),
-        "roundingoptioncode": ("none", "ends in"),
-        "propertyconfigurationstatus": ("not configured",),
-        "producttypecode": ("product",),
-    }
-    preferred = preferred_labels.get(str(column.get("logical_name") or "").casefold(), ())
-    option = None
-    for token in preferred:
-        option = next(
-            (
-                candidate
-                for candidate in options
-                if token in str(
-                    candidate.get("label") if isinstance(candidate, dict) else candidate
-                ).casefold()
-            ),
-            None,
-        )
-        if option is not None:
-            break
+    default_value = column.get("default_value")
+    option = next(
+        (
+            candidate
+            for candidate in options
+            if isinstance(candidate, dict) and candidate.get("value") == default_value
+        ),
+        None,
+    )
     if option is None:
-        option = options[index % len(options)]
+        positive = (
+            "not configured",
+            "no control",
+            "currency amount",
+            "standard",
+            "normal",
+            "default",
+            "active",
+            "product",
+            "none",
+        )
+        negative = (
+            "inactive",
+            "deprecated",
+            "retired",
+            "discontinued",
+            "bundle",
+            "family",
+        )
+
+        def score(candidate: Any) -> tuple[int, int]:
+            if not isinstance(candidate, dict):
+                return (0, 0)
+            labels = candidate.get("labels") or [candidate.get("label")]
+            text = " ".join(str(label or "") for label in labels).casefold()
+            value = sum(4 for token in positive if token in text)
+            value -= sum(5 for token in negative if token in text)
+            return (value, -len(text))
+
+        option = max(options, key=score)
+        if score(option)[0] <= 0:
+            option = options[index % len(options)]
     return option["value"] if isinstance(option, dict) else option
 
 

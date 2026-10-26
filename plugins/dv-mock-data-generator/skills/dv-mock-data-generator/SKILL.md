@@ -167,8 +167,8 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
    satisfied safely.
 9. **Generate records in memory only** (no writes yet) using the schema-driven `fake()` dispatch pattern
    from dv-data's sample-data-generation reference, extended with:
-   - Picklist/Status columns get a value randomly chosen from the **actual** valid OptionSet values (never
-     a placeholder `1`).
+   - Picklist columns use the live default when valid, otherwise choose from the **actual** local/global
+     OptionSet values and all available localized labels (never a placeholder integer).
    - Metadata-declared email columns get a **seed-based alias** — see
      [`references/email-aliasing-and-safety.md`](references/email-aliasing-and-safety.md).
    - Contact/person tables get deterministic human first and last names. Product tables get coherent
@@ -182,7 +182,8 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
      composite keys by tuple, adjusting a writable string component when needed.
    - Apply user-confirmed repository defaults, allowed values, templates, and safe calculations before the
      workbook is rendered.
-   - Use live descriptions, labels, types, formats, relationships, and choice labels to infer semantics.
+   - Use live descriptions, labels, types, formats, relationships, choice defaults, and localized choice
+     labels to infer semantics.
      Generate coherent row-level values rather than independently reusing one organization name across
      unrelated fields.
    - Build and satisfy a metadata-driven quality profile for each table: all writable required fields and
@@ -255,6 +256,8 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
   resolved, same as dv-data's sample-data-generation safety rules.
 - Never tailor generation logic to the currently connected environment. Only live metadata, confirmed
   declarative business rules/repository context, and table relationships may influence profiles and values.
+- Never silently omit a required column with an unsupported attribute type. Block on `SystemRequired`;
+  surface `ApplicationRequired` as an approval warning that the retained probe must verify.
 - Never accept a technically valid but bare-bones workbook row. Revalidate the stored quality profile,
   option values, alternate-key uniqueness, lengths, and numeric bounds before approval and apply.
 - If a `describe`/create probe reveals a plugin-enforced business rule (400 error naming a field or

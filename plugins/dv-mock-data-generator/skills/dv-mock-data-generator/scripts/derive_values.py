@@ -20,6 +20,29 @@ def _column(table: dict[str, Any], types: set[str], pattern: str) -> str | None:
     return None
 
 
+def _column_meaning(column: dict[str, Any]) -> str:
+    return " ".join(
+        (
+            str(column.get("logical_name") or ""),
+            str(column.get("label") or ""),
+            str(column.get("description") or ""),
+        )
+    ).casefold()
+
+
+def _choice_text(column: dict[str, Any], value: Any) -> str:
+    option = next(
+        (
+            item
+            for item in column.get("options") or []
+            if isinstance(item, dict) and item.get("value") == value
+        ),
+        {},
+    )
+    labels = option.get("labels") or [option.get("label")]
+    return " ".join(str(label or "") for label in labels).casefold()
+
+
 def derive_values(
     tables: dict[str, dict[str, Any]],
     records: dict[str, list[dict[str, Any]]],
@@ -29,9 +52,35 @@ def derive_values(
     money = {"Money", "Decimal", "Double"}
     child_amounts: dict[str, list[tuple[str, str, str]]] = {}
 
-    for row in records.get("productpricelevel", []):
-        if row.get("pricingmethodcode") == 1 and "percentage" in row:
-            row["percentage"] = 0
+    for table_name, rows in records.items():
+        table = tables[table_name]
+        pricing_method = next(
+            (
+                column
+                for column in table.get("columns", [])
+                if column.get("type") == "Picklist"
+                and (
+                    "pricing method" in _column_meaning(column)
+                    or "pricingmethod" in _column_meaning(column)
+                )
+            ),
+            None,
+        )
+        percentage = next(
+            (
+                column["logical_name"]
+                for column in table.get("columns", [])
+                if column.get("role") == "percentage"
+                and "percentage" in _column_meaning(column)
+            ),
+            None,
+        )
+        if pricing_method and percentage:
+            method_name = pricing_method["logical_name"]
+            for row in rows:
+                method_text = _choice_text(pricing_method, row.get(method_name))
+                if "amount" in method_text and percentage in row:
+                    row[percentage] = 0
 
     for child in order:
         table = tables[child]

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
-import sys
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
 from build_testdata_workbook import build_workbook
+from auth_loader import import_get_client
 from progress import emit_progress
 from quality_profile import build_quality_profile
-from realistic_data import classify, select_organic
+from realistic_data import classify, select_organic, table_kind
 from testdata_common import SIZE_COUNTS, default_workbook_path, dependency_order, validate_seed_email
 
 
@@ -54,6 +54,15 @@ SKIP_TYPES = {
     "Uniqueidentifier",
     "Virtual",
 }
+SERVER_MANAGED_TYPES = {
+    "EntityName",
+    "ManagedProperty",
+    "Owner",
+    "State",
+    "Status",
+    "Uniqueidentifier",
+    "Virtual",
+}
 SUPPORTED_TYPES = {
     "BigInt",
     "Boolean",
@@ -66,26 +75,6 @@ SUPPORTED_TYPES = {
     "Picklist",
     "String",
 }
-
-
-def import_get_client():
-    candidates = [
-        Path(os.environ["DV_TESTDATA_AUTH_DIR"]) if os.environ.get("DV_TESTDATA_AUTH_DIR") else None,
-        Path.cwd() / "scripts",
-        Path.home()
-        / ".copilot"
-        / "installed-plugins"
-        / "awesome-copilot"
-        / "dataverse"
-        / "scripts",
-    ]
-    for candidate in candidates:
-        if candidate and (candidate / "auth.py").exists():
-            sys.path.insert(0, str(candidate))
-            return importlib.import_module("auth").get_client
-    raise RuntimeError(
-        "auth.py was not found. Set DV_TESTDATA_AUTH_DIR to the Dataverse plugin scripts folder."
-    )
 
 
 def localized_label(value: Any, fallback: str) -> str:
@@ -103,6 +92,20 @@ def localized_label(value: Any, fallback: str) -> str:
 def localized_description(value: Any) -> str:
     label = localized_label(value, "")
     return label.strip()
+
+
+def localized_labels(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    labels = [
+        str(item["Label"])
+        for item in value.get("LocalizedLabels") or []
+        if isinstance(item, dict) and item.get("Label")
+    ]
+    user = value.get("UserLocalizedLabel")
+    if isinstance(user, dict) and user.get("Label"):
+        labels.insert(0, str(user["Label"]))
+    return list(dict.fromkeys(labels))
 
 
 def is_transient_error(error: Exception) -> bool:
@@ -149,12 +152,14 @@ def option_values(column: dict[str, Any]) -> list[dict[str, Any]]:
     for option in option_set.get("Options") or []:
         if option.get("Value") is None:
             continue
-        result.append(
-            {
-                "value": option["Value"],
-                "label": localized_label(option.get("Label"), str(option["Value"])),
-            }
-        )
+        entry = {
+            "value": option["Value"],
+            "label": localized_label(option.get("Label"), str(option["Value"])),
+            "labels": localized_labels(option.get("Label")),
+        }
+        if option.get("State") is not None:
+            entry["state"] = option["State"]
+        result.append(entry)
     return result
 
 
@@ -224,19 +229,37 @@ def fetch_attribute_context(client, table_name: str) -> dict[str, dict[str, Any]
     }
 
 
-def fetch_picklist_options(client, table_name: str) -> dict[str, dict[str, Any]]:
-    """Picklist option sets, which the typed column listing does not always expand."""
+def fetch_choice_metadata(client, table_name: str) -> dict[str, dict[str, Any]]:
+    """Choice metadata, including defaults and local/global option sets."""
     odata = client._get_odata()
-    url = (
+    urls = [
+        (
         f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')/Attributes"
         "/Microsoft.Dynamics.CRM.PicklistAttributeMetadata"
-        "?$select=LogicalName&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)"
-    )
-    items = metadata_json(odata, url).get("value", [])
-    return {
-        item["LogicalName"]: item.get("OptionSet") or item.get("GlobalOptionSet") or {}
-        for item in items
-    }
+        "?$select=LogicalName,DefaultFormValue"
+        "&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)"
+        ),
+        (
+            f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')/Attributes"
+            "/Microsoft.Dynamics.CRM.StateAttributeMetadata"
+            "?$select=LogicalName,DefaultFormValue&$expand=OptionSet($select=Options)"
+        ),
+        (
+            f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')/Attributes"
+            "/Microsoft.Dynamics.CRM.StatusAttributeMetadata"
+            "?$select=LogicalName,DefaultFormValue&$expand=OptionSet($select=Options)"
+        ),
+    ]
+    result: dict[str, dict[str, Any]] = {}
+    for url in urls:
+        for item in metadata_json(odata, url).get("value", []):
+            result[item["LogicalName"]] = {
+                "option_set": (
+                    item.get("OptionSet") or item.get("GlobalOptionSet") or {}
+                ),
+                "default_value": item.get("DefaultFormValue"),
+            }
+    return result
 
 
 def fetch_table_context(client, table_name: str) -> dict[str, Any]:
@@ -319,15 +342,31 @@ def inspect_table(
         )
     for raw in raw_columns:
         raw.update(attribute_context.get(raw.get("LogicalName"), {}))
-    picklist_options = fetch_picklist_options(client, table_name)
+    choice_metadata = fetch_choice_metadata(client, table_name)
     for raw in raw_columns:
-        if raw.get("AttributeType") == "Picklist" and not option_values(raw):
-            raw["OptionSet"] = picklist_options.get(raw.get("LogicalName"), {})
+        metadata = choice_metadata.get(raw.get("LogicalName")) or {}
+        if raw.get("AttributeType") in {"Picklist", "State", "Status"}:
+            if not option_values(raw):
+                raw["OptionSet"] = metadata.get("option_set") or {}
+            if raw.get("DefaultFormValue") is None:
+                raw["DefaultFormValue"] = metadata.get("default_value")
+
+    lifecycle = {
+        raw["AttributeType"].casefold(): {
+            "column": raw["LogicalName"],
+            "options": option_values(raw),
+            "default_value": raw.get("DefaultFormValue"),
+        }
+        for raw in raw_columns
+        if raw.get("AttributeType") in {"State", "Status"}
+        and raw.get("LogicalName")
+    }
 
     columns = []
     organic: list[dict[str, Any]] = []
     representative_custom: list[dict[str, Any]] = []
     lookup_columns: dict[str, dict[str, Any]] = {}
+    unsupported_required: list[dict[str, str]] = []
     for raw in raw_columns:
         logical_name = raw.get("LogicalName")
         attr_type = raw.get("AttributeType")
@@ -360,6 +399,14 @@ def inspect_table(
                 }
             continue
         if attr_type in SKIP_TYPES or attr_type not in SUPPORTED_TYPES:
+            if required and attr_type not in SERVER_MANAGED_TYPES:
+                unsupported_required.append(
+                    {
+                        "column": logical_name,
+                        "type": attr_type,
+                        "required_level": level,
+                    }
+                )
             continue
 
         fmt = raw.get("Format")
@@ -414,6 +461,8 @@ def inspect_table(
                 column[target] = raw[source]
         if attr_type == "Picklist":
             column["options"] = option_values(raw)
+            if raw.get("DefaultFormValue") is not None:
+                column["default_value"] = raw["DefaultFormValue"]
             if not column["options"] and not required:
                 continue
         if include:
@@ -442,6 +491,22 @@ def inspect_table(
             f"{table_name}: repository context references missing or non-writable columns: "
             + ", ".join(sorted(unsupported_context_columns))
         )
+    hard_blockers = [
+        item
+        for item in unsupported_required
+        if item["required_level"] == "SystemRequired"
+    ]
+    if hard_blockers:
+        raise ValueError(
+            f"{table_name}: required columns use unsupported attribute types: "
+            + ", ".join(
+                sorted(
+                    f"{item['column']} ({item['type']})"
+                    for item in hard_blockers
+                )
+            )
+            + ". Add an explicit generator/capability before creating this table."
+        )
 
     return {
         "logical_name": (
@@ -461,8 +526,125 @@ def inspect_table(
         "count": count,
         "columns": columns,
         "context_rules": context_rules,
+        "lifecycle": lifecycle,
+        "unsupported_columns": unsupported_required,
         "_lookup_columns": lookup_columns,
     }
+
+
+def _option_text(option: dict[str, Any]) -> str:
+    labels = option.get("labels") or [option.get("label")]
+    return " ".join(str(label or "") for label in labels).casefold()
+
+
+def _active_transition(table: dict[str, Any]) -> dict[str, int] | None:
+    lifecycle = table.get("lifecycle") or {}
+    state = lifecycle.get("state") or {}
+    status = lifecycle.get("status") or {}
+    active_state = next(
+        (
+            option
+            for option in state.get("options") or []
+            if re.search(r"\bactive\b", _option_text(option))
+            and not re.search(r"\binactive\b", _option_text(option))
+        ),
+        None,
+    )
+    if not active_state:
+        return None
+    data = {state["column"]: int(active_state["value"])}
+    valid_statuses = [
+        option
+        for option in status.get("options") or []
+        if option.get("state") in {None, active_state["value"]}
+    ]
+    active_status = next(
+        (
+            option
+            for option in valid_statuses
+            if re.search(r"\bactive\b", _option_text(option))
+        ),
+        None,
+    )
+    if active_status is None and status.get("default_value") is not None:
+        active_status = next(
+            (
+                option
+                for option in valid_statuses
+                if option.get("value") == status["default_value"]
+            ),
+            None,
+        )
+    if active_status is not None:
+        data[status["column"]] = int(active_status["value"])
+    return data
+
+
+def apply_relationship_semantics(
+    tables: list[dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    by_name = {table["logical_name"]: table for table in tables}
+    kinds = {name: table_kind(table) for name, table in by_name.items()}
+    activation_targets: set[str] = set()
+
+    for source in tables:
+        if kinds[source["logical_name"]] != "line_item":
+            continue
+        for lookup in source.get("lookups", []):
+            target_name = lookup["target_table"]
+            target = by_name.get(target_name)
+            if not target or kinds.get(target_name) != "product":
+                continue
+            activation_targets.add(target_name)
+            target_primary_name = str(target.get("primary_name_column") or "").casefold()
+            conflicting_names = {
+                f"{target_name.casefold()}description",
+                f"{target_name.casefold()}name",
+            }
+            if target_primary_name.startswith(target_name.casefold()):
+                conflicting_names.add(target_primary_name)
+            retained = []
+            removed = []
+            for column in source["columns"]:
+                logical_name = column["logical_name"].casefold()
+                description = str(column.get("description") or "").casefold()
+                is_conflicting = (
+                    logical_name in conflicting_names
+                    or (
+                        "write-in" in description
+                        and target_name.casefold() in description
+                    )
+                )
+                (removed if is_conflicting else retained).append(column)
+            source["columns"] = retained
+            if removed:
+                warnings.append(
+                    f"Omitted {source['logical_name']} fields that conflict with populated "
+                    f"{lookup['column']}: "
+                    + ", ".join(column["logical_name"] for column in removed)
+                    + "."
+                )
+
+    for target_name in sorted(activation_targets):
+        target = by_name[target_name]
+        action_data = _active_transition(target)
+        if action_data:
+            target.setdefault("post_create_actions", []).append(
+                {
+                    "kind": "set_state",
+                    "description": (
+                        f"Set generated {target.get('display_name') or target_name} records "
+                        "to the live metadata-defined Active state before dependent line items."
+                    ),
+                    "data": action_data,
+                }
+            )
+        else:
+            warnings.append(
+                f"{target_name} is referenced by generated line items but no metadata-defined "
+                "Active state transition could be resolved."
+            )
 
 
 def discover_plan(
@@ -476,9 +658,11 @@ def discover_plan(
     context: dict[str, Any] | None = None,
     table_counts: dict[str, int] | None = None,
     existing_tables: set[str] | None = None,
+    existing_limit: int = 500,
 ) -> dict[str, Any]:
     existing_tables = existing_tables or set()
-    existing_limit = 500
+    if existing_limit <= 0:
+        raise ValueError("Existing-record limit must be positive.")
     existing_ids: dict[str, list[str]] = {}
     existing_records: dict[str, list[dict[str, str]]] = {}
     context = context or {}
@@ -509,6 +693,13 @@ def discover_plan(
             context_tables.get(table_name),
         )
         info["inclusion"] = inclusion[table_name]
+        for unsupported in info.get("unsupported_columns", []):
+            warnings.append(
+                f"{table_name}.{unsupported['column']} uses unsupported "
+                f"{unsupported['type']} metadata at {unsupported['required_level']}; "
+                "it is omitted from the workbook and the approved single-record probe "
+                "must verify whether the server enforces it."
+            )
         inspected[table_name] = info
         for column_name, lookup in info["_lookup_columns"].items():
             selected_target = lookup.get("selected_target")
@@ -711,36 +902,7 @@ def discover_plan(
                 + str(dropped.get("column") or dropped.get("column_name"))
             )
 
-    by_name = {table["logical_name"]: table for table in tables}
-    opportunity_product = by_name.get("opportunityproduct")
-    product_table = by_name.get("product")
-    if opportunity_product:
-        lookup_columns = {
-            lookup["column"]: lookup for lookup in opportunity_product.get("lookups", [])
-        }
-        if "productid" in lookup_columns:
-            excluded = {"productdescription", "productname"}
-            before = len(opportunity_product["columns"])
-            opportunity_product["columns"] = [
-                column
-                for column in opportunity_product["columns"]
-                if column["logical_name"] not in excluded
-            ]
-            if len(opportunity_product["columns"]) != before:
-                warnings.append(
-                    "Omitted opportunityproduct productdescription/productname because productid "
-                    "is populated; Dataverse does not allow both product and write-in product values."
-                )
-            if product_table:
-                product_table.setdefault("post_create_actions", []).append(
-                    {
-                        "kind": "set_state",
-                        "description": (
-                            "Activate generated products before dependent opportunity products are created."
-                        ),
-                        "data": {"statecode": 0, "statuscode": 1},
-                    }
-                )
+    apply_relationship_semantics(tables, warnings)
     for table in tables:
         table["quality_profile"] = build_quality_profile(table)
 
@@ -902,6 +1064,12 @@ def main() -> None:
         help="Comma-separated lookup target tables to link to existing records instead of generating them.",
     )
     parser.add_argument(
+        "--existing-limit",
+        type=int,
+        default=500,
+        help="Maximum existing records loaded per lookup target table.",
+    )
+    parser.add_argument(
         "--lookup-targets",
         help="Comma-separated polymorphic selections, e.g. lead.customerid=account.",
     )
@@ -963,6 +1131,7 @@ def main() -> None:
             existing_tables={
                 name.strip() for name in (args.existing_tables or "").split(",") if name.strip()
             },
+            existing_limit=args.existing_limit,
             table_counts=parse_table_counts(args.table_counts),
         )
     except Exception as error:

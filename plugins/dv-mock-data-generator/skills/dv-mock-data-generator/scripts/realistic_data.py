@@ -132,11 +132,18 @@ def classify(
     ):
         return "description"
     if attr_type == "String":
-        if re.search(r"(?:^|_)(?:first|given)name$", name):
+        if re.search(r"(?:^|_)(?:first|given)name$", name) or re.search(
+            r"\b(first|given) name\b", name_label
+        ):
             return "person_first_name"
-        if re.search(r"(?:^|_)(?:last|family|sur)name$", name):
+        if re.search(r"(?:^|_)(?:last|family|sur)name$", name) or re.search(
+            r"\b(last|family|sur)name\b|\b(last|family) name\b",
+            name_label,
+        ):
             return "person_last_name"
-        if re.search(r"(?:^|_)(?:middle|additional)name$", name):
+        if re.search(r"(?:^|_)(?:middle|additional)name$", name) or re.search(
+            r"\b(middle|additional) name\b", name_label
+        ):
             return "person_middle_name"
         for part in ADDRESS_PARTS:
             if re.search(rf"(?:^|_)address\d*_{part}$", name) or (
@@ -220,43 +227,75 @@ def table_kind(table: dict[str, Any]) -> str:
         )
     ).casefold()
     logical_name = str(table.get("logical_name") or "").casefold()
-    column_names = {str(column.get("logical_name") or "").casefold() for column in columns}
-    if logical_name == "productpricelevel":
+    column_text = " ".join(
+        " ".join(
+            (
+                str(column.get("logical_name") or ""),
+                str(column.get("label") or ""),
+                str(column.get("description") or ""),
+            )
+        )
+        for column in columns
+    ).casefold()
+    roles = {str(column.get("role") or "") for column in columns}
+    if (
+        (
+            "pricing method" in column_text
+            and "product" in column_text
+            and ("price list" in column_text or "price level" in column_text)
+        )
+        or ("price" in text and "product" in text and "level" in text)
+    ):
         return "price_list_item"
-    if logical_name == "opportunityproduct":
+    if "opportunity" in text and "product" in text and (
+        "association" in text or "line" in text
+    ):
         return "line_item"
-    if logical_name == "product" or "productnumber" in column_names:
+    if (
+        re.search(r"product (number|code|identifier)|\bsku\b", column_text)
+        or "product_number" in roles
+    ) or (
+        "product" in text and "price list" not in text
+    ):
         return "product"
-    if logical_name == "pricelevel":
+    if "price list" in text or "pricing level" in text:
         return "price_list"
-    if logical_name == "account":
-        return "organization"
-    if logical_name == "contact":
-        return "person"
-    if logical_name == "lead":
-        return "lead"
-    if logical_name == "opportunity":
-        return "opportunity"
-    if logical_name in {"task", "appointment", "phonecall"}:
-        return "activity"
     if "requirement" in logical_name or "requirement" in text:
         return "requirement"
     if "stakeholder" in logical_name or "stakeholder" in text:
         return "stakeholder"
     if "project" in logical_name or "project" in text:
         return "project"
+    if "prospect" in text or "leads are converted" in text:
+        return "lead"
+    if (
+        "organization" in text
+        or "company" in text
+        or "business that represents a customer" in text
+        or {"employees", "revenue"}.intersection(roles)
+    ):
+        return "organization"
     if "sales opportunity" in text:
         return "opportunity"
-    if "sales lead" in text:
+    if "potential revenue" in text or "sales process" in text:
+        return "opportunity"
+    if "sales lead" in text or (
+        "potential customer" in text and "company" in column_text
+    ):
         return "lead"
-    if "activity" in text:
+    if "activity" in text or (
+        re.search(r"\b(subject|topic)\b", column_text)
+        and (
+            "start date" in column_text
+            or "scheduled start" in column_text
+            or {"start_date", "end_date"}.intersection(roles)
+        )
+    ):
         return "activity"
-    if {"firstname", "lastname"}.intersection(column_names):
+    if {"person_first_name", "person_last_name"}.intersection(roles):
         return "person"
     if "price list" in text:
         return "price_list"
-    if "organization" in text or "company" in text:
-        return "organization"
     return "generic"
 
 

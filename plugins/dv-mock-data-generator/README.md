@@ -224,7 +224,7 @@ examples/
      |-- derives a meaningful-data quality profile independently for every table
      |-- aggregates unresolved polymorphic/external dependency decisions
      |-- generates ALL records in memory (no writes), applying:
-     |     - real option-set values (never placeholder ints)
+     |     - live choice defaults and local/global option-set values (never placeholder ints)
      |     - seed-email +alias for every email column
      |     - realistic, coherent person/org/product/project/transaction values
      |     - confirmed repository-derived defaults/rules
@@ -311,6 +311,8 @@ per session and not persisted across sessions unless the user explicitly asks it
   supplied by the user).
 - System/audit columns (`createdon`, `modifiedon`, `ownerid`, `statecode`, `statuscode`) and any unresolved
   lookup are skipped, matching dv-data's sample-data-generation safety rules.
+- Unsupported required attribute types are never silent: `SystemRequired` blocks discovery, while
+  `ApplicationRequired` is shown as a probe-time approval warning.
 - A plugin-enforced business rule discovered via a create-probe error stops the batch, patches the
   generator, and re-confirms with the user rather than silently retrying past failures.
 
