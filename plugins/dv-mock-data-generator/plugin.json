@@ -1,0 +1,6 @@
+{
+  "name": "dv-mock-data-generator",
+  "description": "Generate realistic, schema-aware mock data for Dataverse/Power Apps tables with an editable Excel preview and explicit approval before any write.",
+  "version": "1.0.0",
+  "skills": "./skills/"
+}

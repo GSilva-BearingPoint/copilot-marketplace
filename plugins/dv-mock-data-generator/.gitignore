@@ -1,0 +1,5 @@
+testdata-plan.json
+suggested-test-data.xlsx
+testdata-manifests/
+__pycache__/
+*.pyc

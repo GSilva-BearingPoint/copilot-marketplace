@@ -1,0 +1,32 @@
+{
+  "source": "C:\\repos\\contoso-dataverse-plugins",
+  "notes": [
+    "Rules extracted from the active contact pre-operation plugin and its unit tests."
+  ],
+  "tables": {
+    "contact": {
+      "defaults": {
+        "preferredcontactmethodcode": 2
+      },
+      "allowed_values": {
+        "new_customertier": [
+          100000000,
+          100000001
+        ]
+      },
+      "templates": {
+        "description": "Test contact {firstname} {lastname}"
+      },
+      "calculations": [
+        {
+          "target": "new_estimatedannualvalue",
+          "operation": "multiply",
+          "sources": [
+            "new_monthlyvalue",
+            "new_contractmonths"
+          ]
+        }
+      ]
+    }
+  }
+}

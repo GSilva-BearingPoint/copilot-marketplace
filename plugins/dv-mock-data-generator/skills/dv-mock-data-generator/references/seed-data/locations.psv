@@ -1,0 +1,19 @@
+country|city|state|postal|landline|mobile|legal_suffixes
+Portugal|Lisbon|Lisboa|####-###|+351 21# ### ###|+351 91# ### ###|Lda,S.A.
+Portugal|Porto|Porto|4###-###|+351 22# ### ###|+351 93# ### ###|Lda,S.A.
+Portugal|Braga|Braga|47##-###|+351 253 ### ###|+351 96# ### ###|Lda,S.A.
+Spain|Madrid|Madrid|280##|+34 91# ### ###|+34 6## ### ###|S.L.,S.A.
+Spain|Barcelona|Catalonia|080##|+34 93# ### ###|+34 6## ### ###|S.L.,S.A.
+Spain|Valencia|Valencia|460##|+34 96# ### ###|+34 6## ### ###|S.L.,S.A.
+France|Paris|Ile-de-France|750##|+33 1 ## ## ## ##|+33 6 ## ## ## ##|SAS,SARL
+France|Lyon|Auvergne-Rhone-Alpes|690##|+33 4 ## ## ## ##|+33 7 ## ## ## ##|SAS,SARL
+Germany|Berlin|Berlin|10###|+49 30 #######|+49 151 ########|GmbH,AG
+Germany|Munich|Bavaria|80###|+49 89 #######|+49 170 ########|GmbH,AG
+Germany|Hamburg|Hamburg|20###|+49 40 #######|+49 160 ########|GmbH,AG
+United Kingdom|London|England|EC#A #@@|+44 20 7946 0###|+44 7700 900###|Ltd,PLC
+United Kingdom|Manchester|England|M# #@@|+44 161 496 0###|+44 7700 900###|Ltd,PLC
+United States|New York|NY|100##|+1 (212) 555-01##|+1 (917) 555-01##|Inc.,LLC
+United States|Chicago|IL|606##|+1 (312) 555-01##|+1 (773) 555-01##|Inc.,LLC
+United States|Austin|TX|787##|+1 (512) 555-01##|+1 (737) 555-01##|Inc.,LLC
+Netherlands|Amsterdam|North Holland|10## @@|+31 20 ### ####|+31 6 ########|B.V.,N.V.
+Ireland|Dublin|Leinster|D0#|+353 1 ### ####|+353 85 ### ####|Ltd,DAC

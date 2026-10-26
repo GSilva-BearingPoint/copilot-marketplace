@@ -1,0 +1,13 @@
+Sales
+Finance
+Operations
+Marketing
+IT
+Procurement
+Customer Service
+Human Resources
+Legal
+Engineering
+Logistics
+Quality
+Administration

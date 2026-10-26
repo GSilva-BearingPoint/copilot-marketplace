@@ -1,0 +1,63 @@
+{
+  "name": "account-contact-demo",
+  "environment": "https://example.crm.dynamics.com",
+  "run_id": "preview",
+  "seed_email": "tester@example.com",
+  "tables": [
+    {
+      "logical_name": "account",
+      "entity_set_name": "accounts",
+      "count": 3,
+      "columns": [
+        {
+          "logical_name": "name",
+          "label": "Account Name",
+          "type": "String",
+          "required": true,
+          "unique": true
+        },
+        {
+          "logical_name": "emailaddress1",
+          "label": "Primary Email",
+          "type": "String",
+          "format": "Email"
+        }
+      ],
+      "lookups": []
+    },
+    {
+      "logical_name": "contact",
+      "entity_set_name": "contacts",
+      "count": 6,
+      "columns": [
+        {
+          "logical_name": "firstname",
+          "label": "First Name",
+          "type": "String",
+          "required": true
+        },
+        {
+          "logical_name": "lastname",
+          "label": "Last Name",
+          "type": "String",
+          "required": true
+        },
+        {
+          "logical_name": "emailaddress1",
+          "label": "Primary Email",
+          "type": "String",
+          "format": "Email",
+          "required": true
+        }
+      ],
+      "lookups": [
+        {
+          "column": "parentcustomerid",
+          "navigation_property": "parentcustomerid_account",
+          "target_table": "account",
+          "required": true
+        }
+      ]
+    }
+  ]
+}
