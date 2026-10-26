@@ -176,6 +176,19 @@ def validate(path: Path) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
                         f"{name}!{row_number}: lookup {lookup['column']} points to "
                         f"unknown {lookup['target_table']} key {value!r}."
                     )
+        for action in table.get("post_create_actions", []):
+            if action.get("kind") != "set_state":
+                errors.append(
+                    f"{name}: unsupported post-create action {action.get('kind')!r}."
+                )
+                continue
+            data = action.get("data") or {}
+            if not isinstance(data.get("statecode"), int) or not isinstance(
+                data.get("statuscode"), int
+            ):
+                errors.append(
+                    f"{name}: set_state action requires integer statecode and statuscode."
+                )
     return rows_by_table, errors
 
 

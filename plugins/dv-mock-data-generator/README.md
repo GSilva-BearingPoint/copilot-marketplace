@@ -213,37 +213,38 @@ examples/
      |
  2  verify: dataverse auth who / dataverse org who / pac org who / auth.py --check
      |
- 3  ask: repository process context? (optional)  -> context-rules.json (if confirmed)
+ 3  one setup form for any missing values: connection, seed, count, repository context,
+    workbook destination, existing-record policy, and known lookup targets
      |
- 4  ask: workbook destination (default: Desktop)
+ 4  parse request: table/solution + per-table count (small=25 / medium=250 / large=2500, or explicit N)
      |
- 5  parse request: table list + per-table count (small=25 / medium=250 / large=2500, or explicit N)
-     |
- 6  discover_testdata_workbook.py          (live dv-metadata: required cols, option sets, alt keys, FK graph)
+ 5  discover_testdata_workbook.py          (live descriptions, required cols, option sets, alt keys, FK graph)
      |-- dependency-sorts tables (parents first)
      |-- recursively adds required related tables and records why
      |-- derives a meaningful-data quality profile independently for every table
+     |-- aggregates unresolved polymorphic/external dependency decisions
      |-- generates ALL records in memory (no writes), applying:
      |     - real option-set values (never placeholder ints)
      |     - seed-email +alias for every email column
-     |     - realistic human/org names from references/seed-names
+     |     - realistic, coherent person/org/product/project/transaction values
      |     - confirmed repository-derived defaults/rules
      |     - uniqueness handling for alternate keys
      |-- renders the Excel workbook (one sheet per table + hidden _Metadata)
      |
- 7  validate_testdata_workbook.py          (re-run after any user edit to the workbook)
- 8  summarize_testdata_workbook.py         (counts, dependency reasons, completeness, relationships, samples)
+ 6  validate_testdata_workbook.py          (re-run after any user edit to the workbook)
+ 7  summarize_testdata_workbook.py         (counts, dependency reasons, completeness, relationships, samples)
      |
- 9  ---- HARD APPROVAL GATE: agent must stop and wait for explicit "yes" ----
+ 8  ---- ONE COMBINED HARD APPROVAL GATE: agent must stop and wait for explicit "yes" ----
      |
-10  apply_testdata_workbook.py --approved YES
+ 9  apply_testdata_workbook.py --approved YES
      |-- re-verifies connection
-     |-- creates one probe record per table to catch undocumented business rules
-     |-- commits parent tables first (CreateMultiple/chunked for >=10 rows)
+     |-- creates one single-record probe per table to catch undocumented business rules
+     |-- commits parent tables first (CreateMultiple when supported; safe sequential fallback otherwise)
      |-- binds children via @odata.bind using real parent GUIDs
-     |-- writes a rollback manifest (table -> created GUIDs)
+     |-- applies approved lifecycle actions and deferred cyclic lookups
+     |-- writes a row-level rollback/resume manifest after every successful operation
      |
-11  prints manifest path + per-table counts + environment URL
+10  prints manifest path + per-table counts + environment URL
 ```
 
 Every phase is user-visible with a stable message such as
@@ -257,9 +258,9 @@ Instead of full prose, a user can type:
 ```
 testdata: <size|count> <table1>[,<table2>,...] [seed=<email>] [env=<name>]
 ```
-Examples: `testdata: small account,contact`, `testdata: medium contact seed=jane.doe@contoso.com`,
-`testdata: 40 cr123_project`. The shorthand never skips any mandatory check (dependencies, environment
-confirmation, repository-context question, workbook path, or final approval).
+Examples: `testdata: small account,contact`, `testdata: small solution=ContosoDemo`,
+`testdata: medium contact seed=jane.doe@contoso.com`, `testdata: 40 cr123_project`. Missing setup
+decisions are collected together; the shorthand never skips dependency consent or final approval.
 
 ---
 
@@ -297,6 +298,8 @@ per session and not persisted across sessions unless the user explicitly asks it
 
 - No create/update/delete happens before an explicit user approval of the previewed dry run — every run,
   including repeats in the same session.
+- One requested solution/run produces one combined workbook and one write approval. Lookup ambiguities are
+  collected together instead of creating separately approved subplans.
 - Dependencies are only installed after a separate, explicit consent response — never inferred from the
   original data request.
 - An existing valid user/environment connection is never replaced without asking first; an environment is
@@ -326,7 +329,8 @@ python scripts\check_dependencies.py --json
 # 6. Discover live schema + generate the approval workbook
 python scripts\discover_testdata_workbook.py `
   --environment-url https://selected.crm.dynamics.com `
-  --seed-email user@contoso.com --tables account,contact --size small `
+  --seed-email user@contoso.com --solution ContosoDemo --size small `
+  --lookup-targets lead.customerid=account,opportunity.customerid=account `
   --context-rules context-rules.json `
   --output "$HOME\Desktop\suggested-test-data.xlsx" --plan-output testdata-plan.json
 

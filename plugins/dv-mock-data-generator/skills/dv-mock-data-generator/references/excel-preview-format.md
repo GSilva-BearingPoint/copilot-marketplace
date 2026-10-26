@@ -6,11 +6,13 @@ for confirmation. Static example workbooks are never used for a real request.
 
 ## Visible worksheets
 
-- `README` summarizes environment, run ID, approval status, counts, and dependency/creation order.
+- `README` summarizes environment, run ID, approval status, counts, dependency/creation order, live table
+  descriptions, existing-record dependencies, and approved post-create actions.
 - The creation-order table marks each table as requested or implicit and explains the lookup that caused
   every implicit table to be generated.
 - One worksheet per table contains a stable `__row_key`, generated structural columns, and lookup columns.
-- Required columns are highlighted. Lookup columns use a separate highlight.
+- Required columns are highlighted. Lookup columns use a separate highlight. Header comments contain live
+  field descriptions where Dataverse provides them.
 - Lookup cells contain the parent's `__row_key` and hyperlink directly to that record's row on the related
   worksheet. For example, a contact's `parentcustomerid` cell can display `TD-account-0001` and open the
   exact account row when clicked.
@@ -28,17 +30,19 @@ The very-hidden `_Metadata` worksheet stores JSON describing:
 - Logical table and entity-set names.
 - Structural columns and required flags.
 - Lookup column, navigation property, and target table.
+- Deferred relationship flags, existing-record labels/IDs, and approved lifecycle actions.
 - Column-selection reasons, the per-table meaningful-data quality profile, and explicit/implicit table
   provenance.
-- Discovery warnings, including optional relationships skipped to break dependency cycles.
+- Discovery warnings, including optional relationships deferred until after creates.
 
 Do not expose metadata as editable business data. The validator treats it as the contract for the workbook.
 
 ## Editing rules
 
 - Users may edit suggested values, add rows, or remove rows before approval.
-- Person/contact sheets use human first and last names; other primary/name columns use readable
-  domain-oriented names rather than generic placeholder labels.
+- Person/contact sheets use human first and last names. Product, project, transaction, organization, and
+  other sheets use coherent row-level values inferred from table/field descriptions and metadata rather
+  than generic placeholders or recycled organization names.
 - `__row_key` must remain non-empty and unique within its worksheet.
 - A lookup value must equal an existing `__row_key` on its target worksheet.
 - Required cells cannot be blank.

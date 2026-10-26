@@ -117,8 +117,17 @@ def human_friendly_string(
     table_name: str,
     index: int,
     current_run_id: str = "",
+    context: dict[str, Any] | None = None,
 ) -> str:
+    context = context or {}
     name = column["logical_name"].casefold()
+    meaning = " ".join(
+        (
+            name,
+            str(column.get("label") or "").casefold(),
+            str(column.get("description") or "").casefold(),
+        )
+    )
     if name in {"firstname", "first_name", "givenname", "given_name"}:
         return realistic_data.pick(FIRST_NAMES, index, current_run_id, "first")
     if name in {"middlename", "middle_name", "additionalname", "additional_name"}:
@@ -127,7 +136,37 @@ def human_friendly_string(
         return realistic_data.pick(LAST_NAMES, index, current_run_id, "last")
     if name in {"title", "position"}:
         return realistic_data.generate("job_title", column, table_name, index, current_run_id)
-    org = realistic_data.org_name(index, current_run_id)
+    kind = context.get("kind")
+    if name in {"name", "productname"} and kind == "product":
+        return str(context["product_name"])
+    if any(token in meaning for token in ("product number", "product code", "sku", "productnumber", "productcode")):
+        return str(context.get("product_number") or "")
+    if kind in {"lead", "opportunity"} and any(
+        token in name for token in ("company", "account", "organization")
+    ):
+        return str(context.get("organization_name") or "")
+    if (
+        name in {"name", "title", "subject", "opportunityproductname"}
+        or name.endswith("name")
+        or name.endswith("title")
+    ) and kind in {"line_item", "price_list_item"}:
+        return str(context.get("product_name") or "")
+    if re.search(r"\b(name|title|subject|topic)\b", meaning) and kind in {
+        "project",
+        "requirement",
+        "opportunity",
+        "lead",
+        "activity",
+    }:
+        base = str(context.get("project_name") or "")
+        if kind == "requirement":
+            return f"{base} Requirement"
+        if kind == "activity":
+            return f"Follow up: {base}"
+        return base
+    if name == "name" and kind == "price_list":
+        return f"Standard {realistic_data.pick(('Commercial', 'Services', 'Products'), index, current_run_id, 'price-list')} Price List"
+    org = str(context.get("organization_name") or realistic_data.org_name(index, current_run_id))
     if (
         name in {"name", "accountname", "companyname"}
         or name.endswith("name")
@@ -135,7 +174,7 @@ def human_friendly_string(
     ):
         return org
     if "description" in name or "notes" in name or "comment" in name:
-        return f"{org} record prepared for demonstration and testing."
+        return str(context.get("description") or f"Representative record for {org}.")
     label = column.get("label") or column["logical_name"]
     return f"{org} {label}"
 
@@ -209,6 +248,7 @@ def dependency_order(tables: list[dict[str, Any]]) -> list[str]:
         table["logical_name"]: {
             lookup["target_table"]
             for lookup in table.get("lookups", [])
+            if not lookup.get("deferred")
             if lookup["target_table"] in names
             and lookup["target_table"] != table["logical_name"]
         }
@@ -242,8 +282,43 @@ def _choice_value(column: dict[str, Any], index: int) -> Any:
         raise ValueError(
             f"Choice column {column['logical_name']} has no valid options in the plan."
         )
-    option = options[index % len(options)]
+    preferred_labels = {
+        "productstructure": ("product",),
+        "pricingmethodcode": ("currency amount", "amount"),
+        "quantitysellingcode": ("no control", "whole"),
+        "roundingpolicycode": ("none", "no rounding"),
+        "roundingoptioncode": ("none", "ends in"),
+        "propertyconfigurationstatus": ("not configured",),
+        "producttypecode": ("product",),
+    }
+    preferred = preferred_labels.get(str(column.get("logical_name") or "").casefold(), ())
+    option = None
+    for token in preferred:
+        option = next(
+            (
+                candidate
+                for candidate in options
+                if token in str(
+                    candidate.get("label") if isinstance(candidate, dict) else candidate
+                ).casefold()
+            ),
+            None,
+        )
+        if option is not None:
+            break
+    if option is None:
+        option = options[index % len(options)]
     return option["value"] if isinstance(option, dict) else option
+
+
+def _numeric_range(column: dict[str, Any], default_maximum: float) -> tuple[float, float]:
+    raw_minimum = float(column.get("min_value", 0))
+    raw_maximum = float(column.get("max_value", default_maximum))
+    minimum = max(raw_minimum, 0.0) if raw_maximum >= 0 else raw_minimum
+    maximum = min(raw_maximum, max(minimum, default_maximum))
+    if maximum < minimum:
+        maximum = minimum
+    return minimum, maximum
 
 
 def generate_value(
@@ -252,11 +327,12 @@ def generate_value(
     index: int,
     seed_email: str | None,
     current_run_id: str,
+    context: dict[str, Any] | None = None,
 ) -> Any:
+    context = context or {}
     name = column["logical_name"]
     lowered = name.casefold()
     attr_type = column.get("type", "String")
-    unique_tag = f"{table_name}-{current_run_id}-{index + 1:04d}"
 
     if attr_type == "String" and column.get("format") == "Email":
         if not seed_email:
@@ -268,9 +344,22 @@ def generate_value(
             name,
         )
         return alias_email(seed_email, identifier)
-    role = column.get("role") or realistic_data.classify(name, attr_type, column.get("format"))
+    role = column.get("role") or realistic_data.classify(
+        name,
+        attr_type,
+        column.get("format"),
+        description=str(column.get("description") or ""),
+        label=str(column.get("label") or ""),
+    )
     if role:
-        organic = realistic_data.generate(role, column, table_name, index, current_run_id)
+        organic = realistic_data.generate(
+            role,
+            column,
+            table_name,
+            index,
+            current_run_id,
+            context,
+        )
         if organic is not None:
             return _truncate(organic, column) if isinstance(organic, str) else organic
         if role == "addr_line2":
@@ -280,15 +369,15 @@ def generate_value(
     if attr_type == "Boolean":
         return bool(index % 2)
     if attr_type in {"Integer", "BigInt"}:
-        minimum = int(column.get("min_value", 1))
-        maximum = int(column.get("max_value", max(minimum, 1000)))
+        raw_minimum, raw_maximum = _numeric_range(column, 1000)
+        minimum, maximum = int(raw_minimum), int(raw_maximum)
         return minimum + (index % (maximum - minimum + 1))
     if attr_type in {"Decimal", "Double", "Money"}:
-        minimum = float(column.get("min_value", 1))
-        maximum = float(column.get("max_value", max(minimum, 10000)))
+        minimum, maximum = _numeric_range(column, 10000)
         return round(random.Random(f"{current_run_id}:{table_name}:{name}:{index}").uniform(minimum, maximum), 2)
     if attr_type == "DateTime" and column.get("format") == "DateOnly":
-        return (dt.date.today() - dt.timedelta(days=index)).isoformat()
+        value = context.get("due_date") or context.get("start_date")
+        return value.isoformat() if value else (dt.date.today() + dt.timedelta(days=index)).isoformat()
     if attr_type == "DateTime":
         value = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=index)
         return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -297,7 +386,7 @@ def generate_value(
             return _truncate(
                 realistic_data.generate("phone", column, table_name, index, current_run_id), column
             )
-        value = human_friendly_string(column, table_name, index, current_run_id)
+        value = human_friendly_string(column, table_name, index, current_run_id, context)
         if column.get("unique") and not value.endswith(str(index + 1)):
             value = f"{value} {index + 1}"
         return _truncate(value, column)
@@ -313,10 +402,18 @@ def generate_records(
     count = int(table["count"])
     for index in range(count):
         record = {INTERNAL_KEY: record_key(table["logical_name"], index)}
+        context = realistic_data.row_context(table, index, current_run_id)
         for column in table.get("columns", []):
             if column.get("generate", True) is False:
                 continue
-            value = generate_value(column, table["logical_name"], index, seed_email, current_run_id)
+            value = generate_value(
+                column,
+                table["logical_name"],
+                index,
+                seed_email,
+                current_run_id,
+                context,
+            )
             if value is not None:
                 record[column["logical_name"]] = value
         apply_context_rules(record, table.get("context_rules") or {}, index)

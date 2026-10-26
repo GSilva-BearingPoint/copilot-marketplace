@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import sys
+import time
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,42 @@ def localized_label(value: Any, fallback: str) -> str:
     return fallback
 
 
+def localized_description(value: Any) -> str:
+    label = localized_label(value, "")
+    return label.strip()
+
+
+def is_transient_error(error: Exception) -> bool:
+    transient_tokens = (
+        "database is currently unavailable",
+        "please retry the connection later",
+        "network name is no longer available",
+        "transport-level error",
+        "connection was aborted",
+        "connection reset",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+    )
+    return any(token in str(error).casefold() for token in transient_tokens)
+
+
+def retry_transient(operation):
+    attempts = 4
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as error:
+            if attempt == attempts - 1 or not is_transient_error(error):
+                raise
+            time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")
+
+
+def metadata_json(odata, url: str) -> dict[str, Any]:
+    return retry_transient(lambda: odata._request("get", url).json())
+
+
 def required_level(column: dict[str, Any]) -> str:
     value = column.get("RequiredLevel")
     if isinstance(value, dict):
@@ -158,22 +195,74 @@ def relationship_candidates(client, table_name: str) -> dict[str, list[dict[str,
     return grouped
 
 
-def fetch_attribute_flags(client, table_name: str) -> dict[str, dict[str, Any]]:
-    """Writability flags the typed column listing omits (display-name shadow columns, read-only fields)."""
+def fetch_attribute_context(client, table_name: str) -> dict[str, dict[str, Any]]:
+    """Attribute details the typed column listing may omit."""
     odata = client._get_odata()
     url = (
         f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')/Attributes"
-        "?$select=LogicalName,IsValidForCreate,IsValidODataAttribute,AttributeOf,IsCustomAttribute"
+        "?$select=LogicalName,AttributeType,RequiredLevel,DisplayName,Description,"
+        "IsPrimaryId,IsValidForCreate,IsValidODataAttribute,AttributeOf,IsCustomAttribute"
     )
-    items = odata._request("get", url).json().get("value", [])
+    items = metadata_json(odata, url).get("value", [])
     return {
         item["LogicalName"]: {
             key: item[key]
-            for key in ("IsValidForCreate", "IsValidODataAttribute", "AttributeOf", "IsCustomAttribute")
+            for key in (
+                "Description",
+                "AttributeType",
+                "RequiredLevel",
+                "DisplayName",
+                "IsPrimaryId",
+                "IsValidForCreate",
+                "IsValidODataAttribute",
+                "AttributeOf",
+                "IsCustomAttribute",
+            )
             if key in item
         }
         for item in items
     }
+
+
+def fetch_picklist_options(client, table_name: str) -> dict[str, dict[str, Any]]:
+    """Picklist option sets, which the typed column listing does not always expand."""
+    odata = client._get_odata()
+    url = (
+        f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')/Attributes"
+        "/Microsoft.Dynamics.CRM.PicklistAttributeMetadata"
+        "?$select=LogicalName&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)"
+    )
+    items = metadata_json(odata, url).get("value", [])
+    return {
+        item["LogicalName"]: item.get("OptionSet") or item.get("GlobalOptionSet") or {}
+        for item in items
+    }
+
+
+def fetch_table_context(client, table_name: str) -> dict[str, Any]:
+    odata = client._get_odata()
+    url = (
+        f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')"
+        "?$select=Description,DisplayName"
+    )
+    return metadata_json(odata, url)
+
+
+def fetch_primary_name_column(
+    client,
+    table_name: str,
+    primary_name: str,
+) -> dict[str, Any]:
+    odata = client._get_odata()
+    url = (
+        f"{odata.api}/EntityDefinitions(LogicalName='{table_name}')"
+        f"/Attributes(LogicalName='{primary_name}')"
+        "/Microsoft.Dynamics.CRM.StringAttributeMetadata"
+        "?$select=LogicalName,AttributeType,RequiredLevel,DisplayName,Description,"
+        "IsValidForCreate,IsValidODataAttribute,AttributeOf,IsCustomAttribute,"
+        "IsPrimaryId,MaxLength,Format"
+    )
+    return metadata_json(odata, url)
 
 
 def inspect_table(
@@ -193,6 +282,18 @@ def inspect_table(
     table = client.tables.get(table_name)
     if not table:
         raise ValueError(f"Dataverse table not found: {table_name}")
+    if hasattr(table, "to_dict"):
+        table = table.to_dict()
+    else:
+        table = dict(table)
+    table_context = fetch_table_context(client, table_name)
+    table.update(
+        {
+            key: value
+            for key, value in table_context.items()
+            if key in {"Description", "DisplayName"} and value is not None
+        }
+    )
     primary_name = table.get("PrimaryNameAttribute") or table.get("primary_name_attribute")
     table_alternate_keys = alternate_keys(client, table_name)
     single_key_columns = {
@@ -203,9 +304,25 @@ def inspect_table(
         table_name,
         typed=True,
     )
-    attribute_flags = fetch_attribute_flags(client, table_name)
+    attribute_context = fetch_attribute_context(client, table_name)
+    known_columns = {raw.get("LogicalName") for raw in raw_columns}
+    raw_columns.extend(
+        {"LogicalName": logical_name, **details}
+        for logical_name, details in attribute_context.items()
+        if logical_name not in known_columns
+    )
+    if primary_name and not any(
+        raw.get("LogicalName") == primary_name for raw in raw_columns
+    ):
+        raw_columns.append(
+            fetch_primary_name_column(client, table_name, primary_name)
+        )
     for raw in raw_columns:
-        raw.update(attribute_flags.get(raw.get("LogicalName"), {}))
+        raw.update(attribute_context.get(raw.get("LogicalName"), {}))
+    picklist_options = fetch_picklist_options(client, table_name)
+    for raw in raw_columns:
+        if raw.get("AttributeType") == "Picklist" and not option_values(raw):
+            raw["OptionSet"] = picklist_options.get(raw.get("LogicalName"), {})
 
     columns = []
     organic: list[dict[str, Any]] = []
@@ -218,11 +335,15 @@ def inspect_table(
             continue
         if raw.get("IsPrimaryId") or raw.get("IsValidForCreate") is False:
             continue
-        if raw.get("IsValidODataAttribute") is False:
-            continue
         level = required_level(raw)
         required = level in {"ApplicationRequired", "SystemRequired"}
         recommended = level == "Recommended"
+        if (
+            raw.get("IsValidODataAttribute") is False
+            and logical_name != primary_name
+            and not required
+        ):
+            continue
         if attr_type in {"Lookup", "Customer"}:
             if logical_name not in SYSTEM_LOOKUPS:
                 relationship_rule = (context_rules.get("relationships") or {}).get(logical_name)
@@ -243,7 +364,15 @@ def inspect_table(
 
         fmt = raw.get("Format")
         is_email = attr_type == "String" and fmt == "Email"
-        role = classify(logical_name, attr_type, fmt)
+        description = localized_description(raw.get("Description"))
+        label = localized_label(raw.get("DisplayName"), logical_name)
+        role = classify(
+            logical_name,
+            attr_type,
+            fmt,
+            description=description,
+            label=label,
+        )
         selection_reasons = []
         if all_writable:
             selection_reasons.append("all_writable")
@@ -263,7 +392,7 @@ def inspect_table(
                 continue
         column = {
             "logical_name": logical_name,
-            "label": localized_label(raw.get("DisplayName"), logical_name),
+            "label": label,
             "type": attr_type,
             "required": required,
             "recommended": recommended,
@@ -272,6 +401,8 @@ def inspect_table(
         }
         if role:
             column["role"] = role
+        if description:
+            column["description"] = description
         if fmt:
             column["format"] = fmt
         for source, target in (
@@ -319,6 +450,7 @@ def inspect_table(
             or table_name
         ),
         "display_name": localized_label(table.get("DisplayName"), table_name),
+        "description": localized_description(table.get("Description")),
         "entity_set_name": table.get("EntitySetName") or table.get("entity_set_name"),
         "primary_id_column": (
             table.get("PrimaryIdAttribute")
@@ -348,6 +480,7 @@ def discover_plan(
     existing_tables = existing_tables or set()
     existing_limit = 500
     existing_ids: dict[str, list[str]] = {}
+    existing_records: dict[str, list[dict[str, str]]] = {}
     context = context or {}
     table_counts = table_counts or {}
     context_tables = context.get("tables") or {}
@@ -426,6 +559,7 @@ def discover_plan(
 
     selected_names = set(inspected)
     tables = []
+    lookup_errors: list[str] = []
     for table_name, info in inspected.items():
         lookups = []
         for column_name, lookup in info.pop("_lookup_columns").items():
@@ -449,17 +583,18 @@ def discover_plan(
                             if candidate["target_table"] != table_name
                         }
                     )
-                    raise ValueError(
+                    lookup_errors.append(
                         f"{table_name}.{column_name} is a required lookup but no target table "
                         f"is included. Add one of: {', '.join(possible) or 'unknown target'}."
                     )
                 continue
             if len(candidates) > 1:
-                raise ValueError(
+                lookup_errors.append(
                     f"{table_name}.{column_name} can target multiple included tables: "
                     f"{', '.join(sorted(item['target_table'] for item in candidates))}. "
-                    "Generate separate plans or include only the intended target table."
+                    f"Select one with --lookup-targets {table_name}.{column_name}=<target>."
                 )
+                continue
             chosen = sorted(candidates, key=lambda item: item["target_table"])[0]
             entry = {
                 **chosen,
@@ -469,20 +604,58 @@ def discover_plan(
             target = chosen["target_table"]
             if target in existing_tables:
                 if target not in existing_ids:
-                    id_column = client.tables.get(target).get("PrimaryIdAttribute") or f"{target}id"
-                    rows = client.records.list(target, select=[id_column], top=existing_limit)
-                    existing_ids[target] = [str(row[id_column]) for row in rows]
+                    target_metadata = client.tables.get(target)
+                    id_column = (
+                        target_metadata.get("PrimaryIdAttribute")
+                        or target_metadata.get("primary_id_attribute")
+                        or f"{target}id"
+                    )
+                    name_column = (
+                        target_metadata.get("PrimaryNameAttribute")
+                        or target_metadata.get("primary_name_attribute")
+                    )
+                    select = [id_column] + ([name_column] if name_column else [])
+                    rows = retry_transient(
+                        lambda: client.records.list(
+                            target,
+                            select=select,
+                            top=existing_limit,
+                        )
+                    )
+                    values = sorted(
+                        (
+                            {
+                                "id": str(row[id_column]),
+                                "label": str(row.get(name_column) or row[id_column]),
+                            }
+                            for row in rows
+                        ),
+                        key=lambda item: (item["label"].casefold(), item["id"]),
+                    )
+                    existing_records[target] = values
+                    existing_ids[target] = [item["id"] for item in values]
+                    if len(values) == existing_limit:
+                        warnings.append(
+                            f"Existing-record selection for {target} is limited to the first "
+                            f"{existing_limit} deterministically sorted records."
+                        )
                 if not existing_ids[target]:
                     raise ValueError(f"No existing {target} records found to link {table_name}.{column_name} to.")
                 entry["existing_ids"] = existing_ids[target]
+                entry["existing_records"] = existing_records[target]
             lookups.append(entry)
         info["lookups"] = lookups
         if not info.get("entity_set_name"):
             raise ValueError(f"{table_name}: EntitySetName was not returned by Dataverse.")
         tables.append(info)
 
+    if lookup_errors:
+        raise ValueError(
+            "Unresolved lookup decisions:\n- " + "\n- ".join(sorted(set(lookup_errors)))
+        )
+
     # Optional lookups can form cycles (e.g. account.primarycontactid <-> contact.parentcustomerid).
-    # Drop only optional edges that actually participate in a cycle.
+    # Defer only optional edges that actually participate in a cycle.
     while True:
         try:
             dependency_order(tables)
@@ -493,7 +666,8 @@ def discover_plan(
                 table["logical_name"]: {
                     lookup["target_table"]
                     for lookup in table.get("lookups", [])
-                    if lookup["target_table"] in names
+                    if not lookup.get("deferred")
+                    and lookup["target_table"] in names
                     and lookup["target_table"] != table["logical_name"]
                 }
                 for table in tables
@@ -518,6 +692,7 @@ def discover_plan(
                     for table in tables
                     for lookup in table.get("lookups", [])
                     if not lookup["required"]
+                    and not lookup.get("deferred")
                     and lookup["target_table"] in names
                     and reaches(lookup["target_table"], table["logical_name"])
                 ],
@@ -530,11 +705,42 @@ def discover_plan(
             if not cyclic_edges:
                 raise
             victim, dropped = cyclic_edges[0]
-            victim["lookups"].remove(dropped)
+            dropped["deferred"] = True
             warnings.append(
-                f"Skipped optional lookup on {victim['logical_name']} to avoid a dependency cycle: "
+                f"Deferred optional lookup on {victim['logical_name']} until after creates: "
                 + str(dropped.get("column") or dropped.get("column_name"))
             )
+
+    by_name = {table["logical_name"]: table for table in tables}
+    opportunity_product = by_name.get("opportunityproduct")
+    product_table = by_name.get("product")
+    if opportunity_product:
+        lookup_columns = {
+            lookup["column"]: lookup for lookup in opportunity_product.get("lookups", [])
+        }
+        if "productid" in lookup_columns:
+            excluded = {"productdescription", "productname"}
+            before = len(opportunity_product["columns"])
+            opportunity_product["columns"] = [
+                column
+                for column in opportunity_product["columns"]
+                if column["logical_name"] not in excluded
+            ]
+            if len(opportunity_product["columns"]) != before:
+                warnings.append(
+                    "Omitted opportunityproduct productdescription/productname because productid "
+                    "is populated; Dataverse does not allow both product and write-in product values."
+                )
+            if product_table:
+                product_table.setdefault("post_create_actions", []).append(
+                    {
+                        "kind": "set_state",
+                        "description": (
+                            "Activate generated products before dependent opportunity products are created."
+                        ),
+                        "data": {"statecode": 0, "statuscode": 1},
+                    }
+                )
     for table in tables:
         table["quality_profile"] = build_quality_profile(table)
 
@@ -592,6 +798,73 @@ def parse_table_counts(value: str | None) -> dict[str, int]:
     return result
 
 
+def parse_lookup_targets(value: str | None) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item or "." not in item.split("=", 1)[0]:
+            raise ValueError(
+                f"Invalid lookup target {item!r}; expected table.column=target-table."
+            )
+        source, target = (part.strip() for part in item.split("=", 1))
+        table, column = (part.strip() for part in source.split(".", 1))
+        if not table or not column or not target:
+            raise ValueError(
+                f"Invalid lookup target {item!r}; expected table.column=target-table."
+            )
+        relationships = result.setdefault(table, {})
+        if column in relationships:
+            raise ValueError(f"Duplicate lookup target for {table}.{column}.")
+        relationships[column] = target
+    return result
+
+
+def _odata_values(odata, url: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    next_url: str | None = url
+    while next_url:
+        payload = metadata_json(odata, next_url)
+        result.extend(payload.get("value", []))
+        next_url = payload.get("@odata.nextLink")
+    return result
+
+
+def solution_table_names(client, unique_name: str) -> list[str]:
+    escaped = unique_name.replace("'", "''")
+    odata = client._get_odata()
+    solutions = _odata_values(
+        odata,
+        f"{odata.api}/solutions?$select=solutionid&$filter=uniquename eq '{escaped}'",
+    )
+    if len(solutions) != 1:
+        raise ValueError(
+            f"Expected one solution with unique name {unique_name!r}; found {len(solutions)}."
+        )
+    solution_id = solutions[0]["solutionid"]
+    components = _odata_values(
+        odata,
+        f"{odata.api}/solutioncomponents?$select=objectid"
+        f"&$filter=_solutionid_value eq {solution_id} and componenttype eq 1",
+    )
+    names = []
+    for component in components:
+        object_id = component.get("objectid")
+        if not object_id:
+            continue
+        entity = metadata_json(
+            odata,
+            f"{odata.api}/EntityDefinitions({object_id})?$select=LogicalName",
+        )
+        if entity.get("LogicalName"):
+            names.append(str(entity["LogicalName"]))
+    names = list(dict.fromkeys(names))
+    if not names:
+        raise ValueError(f"Solution {unique_name!r} contains no table components.")
+    return names
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -599,7 +872,9 @@ def main() -> None:
             "from its current table metadata and relationships."
         )
     )
-    parser.add_argument("--tables", required=True, help="Comma-separated table logical names.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--tables", help="Comma-separated table logical names.")
+    source.add_argument("--solution", help="Solution unique name whose table components should be included.")
     volume = parser.add_mutually_exclusive_group(required=True)
     volume.add_argument("--size", choices=sorted(SIZE_COUNTS))
     volume.add_argument("--count", type=int)
@@ -626,6 +901,10 @@ def main() -> None:
         "--existing-tables",
         help="Comma-separated lookup target tables to link to existing records instead of generating them.",
     )
+    parser.add_argument(
+        "--lookup-targets",
+        help="Comma-separated polymorphic selections, e.g. lead.customerid=account.",
+    )
     parser.add_argument("--all-writable-columns", action="store_true")
     parser.add_argument("--no-required-related", action="store_true")
     args = parser.parse_args()
@@ -633,32 +912,44 @@ def main() -> None:
     count = args.count if args.count is not None else SIZE_COUNTS[args.size]
     if count <= 0:
         raise ValueError("Record count must be positive.")
-    table_names = [value.strip() for value in args.tables.split(",") if value.strip()]
-    if not table_names:
-        raise ValueError("At least one table logical name is required.")
-    emit_progress(
-        4,
-        "running",
-        "Reading writable columns, keys, choices, business constraints, and relationships "
-        f"for {', '.join(table_names)}. This determines what can be filled safely.",
-        "Resolve required dependencies and build a per-table generation profile.",
-    )
     os.environ["DATAVERSE_URL"] = args.environment_url.rstrip("/")
     get_client = import_get_client()
     require_delegated_auth()
     client = get_client("dv-data")
     # A real read proves the selected environment is reachable with the signed-in user's account.
-    organizations = client.records.list(
-        "organization",
-        select=["organizationid"],
-        top=1,
+    organizations = retry_transient(
+        lambda: client.records.list(
+            "organization",
+            select=["organizationid"],
+            top=1,
+        )
     )
     if not organizations:
         raise RuntimeError("Authenticated connection is valid but no organization row was returned.")
+    table_names = (
+        [value.strip() for value in args.tables.split(",") if value.strip()]
+        if args.tables
+        else solution_table_names(client, args.solution)
+    )
+    if not table_names:
+        raise ValueError("At least one table logical name is required.")
+    emit_progress(
+        4,
+        "running",
+        "Reading writable columns, descriptions, keys, choices, business constraints, and "
+        f"relationships for {', '.join(table_names)}. This determines what can be filled safely.",
+        "Resolve required dependencies and build a per-table generation profile.",
+    )
     context = {}
     if args.context_rules:
         with Path(args.context_rules).open(encoding="utf-8") as handle:
             context = json.load(handle)
+    lookup_targets = parse_lookup_targets(args.lookup_targets)
+    if lookup_targets:
+        context.setdefault("tables", {})
+        for table_name, relationships in lookup_targets.items():
+            table_rules = context["tables"].setdefault(table_name, {})
+            table_rules.setdefault("relationships", {}).update(relationships)
     try:
         plan = discover_plan(
             client=client,
@@ -706,7 +997,10 @@ def main() -> None:
     output_path = (
         Path(args.output)
         if args.output
-        else default_workbook_path(table_names, count)
+        else default_workbook_path(
+            [f"solution-{args.solution}"] if args.solution else table_names,
+            count,
+        )
     )
     emit_progress(
         5,

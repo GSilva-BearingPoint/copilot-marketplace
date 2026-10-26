@@ -48,6 +48,8 @@ def summarize(workbook_path: Path) -> str:
         table_summaries.append(f"{len(rows)} {table_name}")
         for lookup in table.get("lookups", []):
             source = "existing records" if lookup.get("existing_ids") else "generated records"
+            if lookup.get("deferred"):
+                source += ", deferred until after creates"
             relationships.append(
                 f"{table_name}.{lookup['column']} -> {lookup['target_table']} ({source})"
             )
@@ -80,6 +82,11 @@ def summarize(workbook_path: Path) -> str:
             lines.append(
                 f"  Sample {sample_number}: "
                 + json.dumps(row, default=str, ensure_ascii=True, sort_keys=True)
+            )
+        for action in table.get("post_create_actions", []):
+            lines.append(
+                "  Post-create action: "
+                + str(action.get("description") or action.get("kind"))
             )
 
     warnings = run.get("warnings") or []

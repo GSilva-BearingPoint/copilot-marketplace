@@ -9,7 +9,7 @@ Reuse dv-data's sample-data-generation query (filtered to avoid duplicated looku
 ```python
 attrs = client.tables.list_columns(
     TABLE,
-    select=["LogicalName", "AttributeType", "RequiredLevel", "DisplayName"],
+    select=["LogicalName", "AttributeType", "RequiredLevel", "DisplayName", "Description"],
     filter="AttributeOf eq null",
 )
 required = [
@@ -24,9 +24,11 @@ doesn't mark them required. `RequiredLevel.CanBeChanged` only says whether the r
 customized; it must never be used to discard an otherwise writable column.
 
 Also add a light "organic profile" **derived from the live metadata, not a fixed column list**. Each writable
-column is classified (`classify()` in `scripts/realistic_data.py`) from its `AttributeType`, `Format` and
-logical name into a role: address parts, phone (landline/mobile), URL, job title, department, birthdate,
-employee count, revenue. Custom columns are picked up the same way; columns absent from the environment are
+column is classified (`classify()` in `scripts/realistic_data.py`) from its `AttributeType`, `Format`,
+logical name, display label, field description, table description, and relationships into a role: address
+parts, phone (landline/mobile), URL, job title, department, birthdate, employee count, revenue, products,
+budgets, effort, percentages, quantities, and lifecycle dates. Custom columns are picked up the same way;
+columns absent from the environment are
 simply not generated; numeric values are clamped to the column's `MinValue`/`MaxValue`; strings to
 `MaxLength`. To stay light, only one address group, one landline, one mobile and one URL column are kept
 (primary columns such as `telephone1`/`websiteurl` win; fax/pager/FTP/image columns are ignored). The chosen
@@ -58,7 +60,9 @@ so.
 Vocabulary lives in `references/seed-data/` (`company-names.txt` ~6000 generated names, `company-sectors.txt`,
 `street-names.txt`, `job-titles.txt`, `departments.txt`, `locations.psv` with city/state/postal/phone masks
 and legal suffixes per country). Regenerate company names with `python scripts\generate_seed_data.py`.
-Selection is offset by the run id, so every run differs while values stay unique within a run: company names
+Selection is offset by the run id, so every run differs while values stay unique within a run. A row-level
+semantic context keeps names, descriptions, identifiers, prices, dates, and derived fields coherent instead
+of generating every field independently. Company names
 combine a base name + sector + country legal suffix (e.g. `Nacou Capital LLC`). Address, postal code,
 country, phone and legal suffix for a row share one location, and a contact shares it with the account of
 the same index.
@@ -68,8 +72,9 @@ the same index.
 Never use a placeholder integer. For each Picklist/Status column, look up the real options:
 
 ```python
-options = client.tables.describe(TABLE, include="all")  # or targeted OptionSet query
-# Resolve the specific attribute's OptionSet values; pick randomly from valid Value entries only.
+GET /api/data/v9.2/EntityDefinitions(LogicalName='<table>')/Attributes/
+    Microsoft.Dynamics.CRM.PicklistAttributeMetadata
+    ?$select=LogicalName&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)
 ```
 
 If an option set has a "Default/Inactive" value that shouldn't be used for new test records (e.g., a
@@ -100,8 +105,9 @@ confirmed relationship rule:
 - If `ReferencedEntity` is one of the other requested tables -> add a dependency edge (child depends on
   parent).
 - If a required lookup has exactly one external target, dynamically add that related table to the plan.
-- If a required lookup is polymorphic or cannot be resolved, stop workbook generation and ask the user to
-  select the intended target — never silently skip it or fabricate a GUID.
+- If a required lookup is polymorphic or cannot be resolved, add it to the consolidated unresolved-decision
+  report. Ask once for all target selections, then regenerate one combined workbook — never silently skip it,
+  fabricate a GUID, or split the run into independently approved plans.
 - Optional lookups are included when their target table is part of the requested/generated table set.
 - A confirmed repository rule may select one valid target for an optional or polymorphic lookup. The target
   must still exist in live relationship metadata.
@@ -110,7 +116,10 @@ Every generated table records whether it was explicitly requested or implicitly 
 record the source table, lookup column, requirement type, and dependency path. This provenance is shown in
 the workbook and approval summary so automatic creation is never silent.
 
-Topologically sort the requested tables by these edges. Tables with no incoming edges are Level 0 and can
+Topologically sort the requested tables by these edges. Optional edges that form a cycle are retained as
+deferred post-create updates and are visible in workbook metadata. Required cycles must be broken by an
+existing record or explicit rule; otherwise report them as blockers. Tables with no incoming edges are
+Level 0 and can
 be generated/committed in parallel; each subsequent level depends on the previous (same leveling pattern as
 dv-data's `references/multi-table-fk-import.md`).
 

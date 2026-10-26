@@ -18,7 +18,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_testdata_workbook import build_workbook
 import check_dependencies
-from discover_testdata_workbook import discover_plan, inspect_table, parse_table_counts
+from discover_testdata_workbook import (
+    discover_plan,
+    inspect_table,
+    parse_lookup_targets,
+    parse_table_counts,
+    solution_table_names,
+)
 from progress import progress_message
 from quality_profile import build_quality_profile
 from summarize_testdata_workbook import summarize
@@ -35,6 +41,7 @@ def column(
     custom: bool = True,
     fmt: str | None = None,
     max_length: int | None = 100,
+    description: str | None = None,
 ) -> dict:
     value = {
         "LogicalName": name,
@@ -50,15 +57,17 @@ def column(
         value["Format"] = fmt
     if attr_type in {"String", "Memo"} and max_length is not None:
         value["MaxLength"] = max_length
+    if description:
+        value["Description"] = {"UserLocalizedLabel": {"Label": description}}
     return value
 
 
 class FakeResponse:
-    def __init__(self, values: list[dict]):
-        self.values = values
+    def __init__(self, payload):
+        self.payload = payload
 
     def json(self) -> dict:
-        return {"value": self.values}
+        return copy.deepcopy(self.payload)
 
 
 class FakeOData:
@@ -69,20 +78,39 @@ class FakeOData:
 
     def _request(self, _method: str, url: str) -> FakeResponse:
         table_name = url.split("LogicalName='", 1)[1].split("'", 1)[0]
+        if "PicklistAttributeMetadata" in url:
+            choices = [
+                {
+                    "LogicalName": raw["LogicalName"],
+                    "OptionSet": raw.get("OptionSet"),
+                    "GlobalOptionSet": raw.get("GlobalOptionSet"),
+                }
+                for raw in self.schemas[table_name]["columns"]
+                if raw.get("AttributeType") == "Picklist"
+            ]
+            return FakeResponse({"value": choices})
+        if "/Attributes" not in url:
+            return FakeResponse(self.schemas[table_name]["table"])
         flags = [
             {
                 key: raw[key]
                 for key in (
                     "LogicalName",
+                    "AttributeType",
+                    "RequiredLevel",
+                    "DisplayName",
+                    "IsPrimaryId",
                     "IsValidForCreate",
                     "IsValidODataAttribute",
                     "AttributeOf",
                     "IsCustomAttribute",
+                    "Description",
                 )
+                if key in raw
             }
             for raw in self.schemas[table_name]["columns"]
         ]
-        return FakeResponse(flags)
+        return FakeResponse({"value": flags})
 
 
 class FakeTables:
@@ -94,7 +122,11 @@ class FakeTables:
 
     def list_columns(self, table_name: str, typed: bool = True) -> list[dict]:
         self.assert_true(typed)
-        return copy.deepcopy(self.schemas[table_name]["columns"])
+        result = copy.deepcopy(self.schemas[table_name]["columns"])
+        for item in result:
+            item.pop("OptionSet", None)
+            item.pop("GlobalOptionSet", None)
+        return result
 
     def get_alternate_keys(self, table_name: str) -> list[dict]:
         return copy.deepcopy(self.schemas[table_name].get("keys", []))
@@ -138,6 +170,7 @@ def table_schema(
     primary_name: str,
     relationships: list[dict] | None = None,
     keys: list[dict] | None = None,
+    description: str | None = None,
 ) -> dict:
     return {
         "table": {
@@ -146,6 +179,9 @@ def table_schema(
             "PrimaryIdAttribute": f"{name}id",
             "PrimaryNameAttribute": primary_name,
             "DisplayName": {"UserLocalizedLabel": {"Label": name}},
+            "Description": {
+                "UserLocalizedLabel": {"Label": description or f"{name} records"}
+            },
         },
         "columns": columns,
         "relationships": relationships or [],
@@ -154,6 +190,35 @@ def table_schema(
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_solution_components_expand_to_unique_table_names(self) -> None:
+        class SolutionOData:
+            api = "https://metadata.invalid/api/data/v9.2"
+
+            def _request(self, _method: str, url: str) -> FakeResponse:
+                if "/solutions?" in url:
+                    return FakeResponse({"value": [{"solutionid": "solution-id"}]})
+                if "/solutioncomponents?" in url:
+                    return FakeResponse(
+                        {
+                            "value": [
+                                {"objectid": "account-id"},
+                                {"objectid": "contact-id"},
+                                {"objectid": "account-id"},
+                            ]
+                        }
+                    )
+                logical_name = "account" if "account-id" in url else "contact"
+                return FakeResponse({"LogicalName": logical_name})
+
+        class SolutionClient:
+            def _get_odata(self):
+                return SolutionOData()
+
+        self.assertEqual(
+            ["account", "contact"],
+            solution_table_names(SolutionClient(), "ExampleSolution"),
+        )
+
     def test_fixed_required_primary_and_representative_custom_columns(self) -> None:
         schemas = {
             "new_widget": table_schema(
@@ -179,7 +244,7 @@ class DiscoveryTests(unittest.TestCase):
             if "representative_custom" in item["selection_reasons"]
         ]
         self.assertEqual(3, len(representative))
-        self.assertEqual(4, len(info["columns"]))
+        self.assertEqual(5, len(info["columns"]))
 
     def test_required_dependency_is_filled_and_explained(self) -> None:
         schemas = {
@@ -260,6 +325,20 @@ class DiscoveryTests(unittest.TestCase):
         for value in ("a", "a=0", "a=x", "a=1,a=2"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_table_counts(value)
+
+    def test_lookup_target_parser_collects_multiple_decisions(self) -> None:
+        self.assertEqual(
+            {
+                "lead": {"customerid": "account"},
+                "opportunity": {"customerid": "account"},
+            },
+            parse_lookup_targets(
+                "lead.customerid=account,opportunity.customerid=account"
+            ),
+        )
+        for value in ("lead", "lead.customerid", "lead.=account"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_lookup_targets(value)
 
     def test_confirmed_relationship_rule_selects_optional_dependency(self) -> None:
         schemas = {
@@ -469,10 +548,225 @@ class DiscoveryTests(unittest.TestCase):
             "https://environment.invalid",
         )
         by_name = {table["logical_name"]: table for table in plan["tables"]}
-        lookup_columns = {lookup["column"] for lookup in by_name["abc_b"]["lookups"]}
+        lookups = {
+            lookup["column"]: lookup for lookup in by_name["abc_b"]["lookups"]
+        }
 
-        self.assertNotIn("abc_aid", lookup_columns)
-        self.assertIn("abc_cid", lookup_columns)
+        self.assertTrue(lookups["abc_aid"]["deferred"])
+        self.assertFalse(lookups["abc_cid"].get("deferred", False))
+
+    def test_picklist_options_and_descriptions_are_recovered_from_metadata(self) -> None:
+        choice = column(
+            "abc_priority",
+            attr_type="Picklist",
+            required="ApplicationRequired",
+            description="Controls delivery urgency.",
+        )
+        choice["GlobalOptionSet"] = {
+            "Options": [
+                {
+                    "Value": 10,
+                    "Label": {"UserLocalizedLabel": {"Label": "Normal"}},
+                },
+                {
+                    "Value": 20,
+                    "Label": {"UserLocalizedLabel": {"Label": "Urgent"}},
+                },
+            ]
+        }
+        schemas = {
+            "abc_item": table_schema(
+                "abc_item",
+                [
+                    column("abc_name", required="ApplicationRequired"),
+                    choice,
+                ],
+                primary_name="abc_name",
+                description="Delivery items managed by the project team.",
+            )
+        }
+
+        info = inspect_table(FakeClient(schemas), "abc_item", 2, False)
+        by_name = {item["logical_name"]: item for item in info["columns"]}
+
+        self.assertEqual("Delivery items managed by the project team.", info["description"])
+        self.assertEqual("Controls delivery urgency.", by_name["abc_priority"]["description"])
+        self.assertEqual([10, 20], [item["value"] for item in by_name["abc_priority"]["options"]])
+
+    def test_all_polymorphic_lookup_decisions_are_reported_together(self) -> None:
+        relationships = []
+        columns = [column("abc_name", required="ApplicationRequired")]
+        for lookup_name in ("abc_customerid", "abc_regardingid"):
+            columns.append(
+                column(lookup_name, attr_type="Lookup", required="ApplicationRequired")
+            )
+            for target in ("abc_account", "abc_contact"):
+                relationships.append(
+                    {
+                        "ReferencingEntity": "abc_activity",
+                        "ReferencingAttribute": lookup_name,
+                        "ReferencedEntity": target,
+                        "ReferencingEntityNavigationPropertyName": f"{lookup_name}_{target}",
+                    }
+                )
+        schemas = {
+            "abc_activity": table_schema(
+                "abc_activity",
+                columns,
+                primary_name="abc_name",
+                relationships=relationships,
+            ),
+            "abc_account": table_schema(
+                "abc_account",
+                [column("abc_name", required="ApplicationRequired")],
+                primary_name="abc_name",
+            ),
+            "abc_contact": table_schema(
+                "abc_contact",
+                [column("abc_name", required="ApplicationRequired")],
+                primary_name="abc_name",
+            ),
+        }
+
+        with self.assertRaises(ValueError) as raised:
+            discover_plan(
+                FakeClient(schemas),
+                ["abc_activity", "abc_account", "abc_contact"],
+                2,
+                None,
+                "https://environment.invalid",
+            )
+
+        message = str(raised.exception)
+        self.assertIn("abc_activity.abc_customerid", message)
+        self.assertIn("abc_activity.abc_regardingid", message)
+
+    def test_product_dependency_adds_activation_and_removes_write_in_fields(self) -> None:
+        structure = column(
+            "productstructure",
+            attr_type="Picklist",
+            required="ApplicationRequired",
+        )
+        structure["OptionSet"] = {
+            "Options": [
+                {
+                    "Value": 1,
+                    "Label": {"UserLocalizedLabel": {"Label": "Product"}},
+                }
+            ]
+        }
+        schemas = {
+            "product": table_schema(
+                "product",
+                [
+                    column("name", required="ApplicationRequired"),
+                    column("productnumber", required="ApplicationRequired"),
+                    structure,
+                ],
+                primary_name="name",
+            ),
+            "opportunityproduct": table_schema(
+                "opportunityproduct",
+                [
+                    column("opportunityproductname", required="ApplicationRequired"),
+                    column("productdescription"),
+                    column("productname"),
+                    column("productid", attr_type="Lookup", required="ApplicationRequired"),
+                ],
+                primary_name="opportunityproductname",
+                relationships=[
+                    {
+                        "ReferencingEntity": "opportunityproduct",
+                        "ReferencingAttribute": "productid",
+                        "ReferencedEntity": "product",
+                        "ReferencingEntityNavigationPropertyName": "productid_nav",
+                    }
+                ],
+            ),
+        }
+        plan = discover_plan(
+            FakeClient(schemas),
+            ["product", "opportunityproduct"],
+            2,
+            None,
+            "https://environment.invalid",
+        )
+        by_name = {table["logical_name"]: table for table in plan["tables"]}
+
+        self.assertEqual("set_state", by_name["product"]["post_create_actions"][0]["kind"])
+        opportunity_columns = {
+            column["logical_name"] for column in by_name["opportunityproduct"]["columns"]
+        }
+        self.assertNotIn("productdescription", opportunity_columns)
+        self.assertNotIn("productname", opportunity_columns)
+
+    def test_required_activity_primary_name_is_kept_when_odata_flag_is_false(self) -> None:
+        subject = column(
+            "subject",
+            required="ApplicationRequired",
+            description="Primary topic of the activity.",
+        )
+        subject["IsValidODataAttribute"] = False
+        schemas = {
+            "task": table_schema(
+                "task",
+                [subject],
+                primary_name="subject",
+                description="Activity representing work to be completed.",
+            )
+        }
+
+        info = inspect_table(FakeClient(schemas), "task", 1, False)
+
+        self.assertEqual(["subject"], [item["logical_name"] for item in info["columns"]])
+
+    def test_unfamiliar_custom_schema_uses_descriptions_dynamically(self) -> None:
+        schemas = {
+            "x7_deliverybrief": table_schema(
+                "x7_deliverybrief",
+                [
+                    column(
+                        "x7_caption",
+                        required="ApplicationRequired",
+                        description="Project title shown to delivery teams.",
+                    ),
+                    column(
+                        "x7_narrative",
+                        attr_type="Memo",
+                        description="Detailed project description and expected outcomes.",
+                    ),
+                    column(
+                        "x7_capacity",
+                        attr_type="Decimal",
+                        description="Estimated implementation effort in hours.",
+                    ),
+                    column(
+                        "x7_target",
+                        attr_type="DateTime",
+                        fmt="DateOnly",
+                        description="Target completion deadline.",
+                    ),
+                ],
+                primary_name="x7_caption",
+                description="Project intake requests for customer delivery work.",
+            )
+        }
+
+        table = inspect_table(
+            FakeClient(schemas),
+            "x7_deliverybrief",
+            2,
+            False,
+        )
+        by_name = {item["logical_name"]: item for item in table["columns"]}
+        records = generate_records(table, None, "custom-schema")
+
+        self.assertEqual("description", by_name["x7_narrative"]["role"])
+        self.assertEqual("effort", by_name["x7_capacity"]["role"])
+        self.assertEqual("due_date", by_name["x7_target"]["role"])
+        self.assertIn(" for ", records[0]["x7_caption"])
+        self.assertIn("expected scope", records[0]["x7_narrative"])
+        self.assertGreater(records[0]["x7_capacity"], 0)
 
 
 class WorkbookTests(unittest.TestCase):
@@ -753,6 +1047,209 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(3, len(keys))
         self.assertEqual("EXT", records[0]["abc_code"])
         self.assertEqual("EXT-2", records[1]["abc_code"])
+
+    def test_product_rows_are_coherent_and_realistic(self) -> None:
+        table = {
+            "logical_name": "product",
+            "display_name": "Product",
+            "description": "Products available for sale.",
+            "primary_name_column": "name",
+            "count": 3,
+            "columns": [
+                {"logical_name": "name", "type": "String", "max_length": 100},
+                {
+                    "logical_name": "productnumber",
+                    "type": "String",
+                    "role": "product_number",
+                    "max_length": 100,
+                },
+                {
+                    "logical_name": "description",
+                    "type": "Memo",
+                    "role": "description",
+                    "max_length": 500,
+                },
+                {
+                    "logical_name": "price",
+                    "type": "Money",
+                    "role": "unit_price",
+                    "min_value": 0,
+                    "max_value": 10000,
+                },
+                {
+                    "logical_name": "productstructure",
+                    "type": "Picklist",
+                    "options": [
+                        {"value": 1, "label": "Product"},
+                        {"value": 2, "label": "Product Family"},
+                    ],
+                },
+            ],
+            "lookups": [],
+            "context_rules": {},
+        }
+
+        first = generate_records(table, None, "product-run")
+        second = generate_records(table, None, "product-run")
+
+        self.assertEqual(first, second)
+        self.assertTrue(all(row["productnumber"].startswith("PRD-") for row in first))
+        self.assertTrue(all("record prepared" not in row["description"] for row in first))
+        self.assertTrue(all(0 < row["price"] <= 10000 for row in first))
+        self.assertTrue(all(row["productstructure"] == 1 for row in first))
+        self.assertEqual(3, len({row["name"] for row in first}))
+
+    def test_deferred_cycle_hyperlinks_are_rendered_after_all_sheets_exist(self) -> None:
+        schemas = {
+            "abc_a": table_schema(
+                "abc_a",
+                [
+                    column("abc_name", required="ApplicationRequired"),
+                    column("abc_bid", attr_type="Lookup", required="ApplicationRequired"),
+                ],
+                primary_name="abc_name",
+                relationships=[
+                    {
+                        "ReferencingEntity": "abc_a",
+                        "ReferencingAttribute": "abc_bid",
+                        "ReferencedEntity": "abc_b",
+                        "ReferencingEntityNavigationPropertyName": "abc_bid_nav",
+                    }
+                ],
+            ),
+            "abc_b": table_schema(
+                "abc_b",
+                [
+                    column("abc_name", required="ApplicationRequired"),
+                    column("abc_aid", attr_type="Lookup"),
+                ],
+                primary_name="abc_name",
+                relationships=[
+                    {
+                        "ReferencingEntity": "abc_b",
+                        "ReferencingAttribute": "abc_aid",
+                        "ReferencedEntity": "abc_a",
+                        "ReferencingEntityNavigationPropertyName": "abc_aid_nav",
+                    }
+                ],
+            ),
+        }
+        plan = discover_plan(
+            FakeClient(schemas),
+            ["abc_a"],
+            1,
+            None,
+            "https://environment.invalid",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cycle.xlsx"
+            build_workbook(plan, path)
+            workbook = load_workbook(path)
+            worksheet = workbook["abc_b"]
+            headers = [cell.value for cell in worksheet[1]]
+            cell = worksheet.cell(2, headers.index("abc_aid") + 1)
+
+            self.assertTrue(cell.hyperlink.target.startswith("#'abc_a'!"))
+            _rows, errors = validate(path)
+            self.assertEqual([], errors)
+
+    def test_child_primary_name_is_not_overwritten_by_lookup_parent_name(self) -> None:
+        pricelevel = {
+            "logical_name": "pricelevel",
+            "display_name": "Price List",
+            "primary_name_column": "name",
+            "entity_set_name": "pricelevels",
+            "count": 1,
+            "columns": [{"logical_name": "name", "type": "String", "required": True}],
+            "lookups": [],
+            "context_rules": {},
+            "inclusion": {"kind": "requested", "dependency_path": ["pricelevel"], "reasons": []},
+        }
+        account = {
+            "logical_name": "account",
+            "display_name": "Account",
+            "primary_name_column": "name",
+            "entity_set_name": "accounts",
+            "count": 1,
+            "columns": [{"logical_name": "name", "type": "String", "required": True}],
+            "lookups": [
+                {
+                    "column": "defaultpricelevelid",
+                    "navigation_property": "defaultpricelevelid",
+                    "target_table": "pricelevel",
+                    "required": False,
+                }
+            ],
+            "context_rules": {},
+            "inclusion": {"kind": "requested", "dependency_path": ["account"], "reasons": []},
+        }
+        for table in (pricelevel, account):
+            table["quality_profile"] = build_quality_profile(table)
+        spec = {
+            "name": "test",
+            "environment": "https://environment.invalid",
+            "run_id": "names",
+            "tables": [account, pricelevel],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "names.xlsx"
+            build_workbook(spec, path)
+            workbook = load_workbook(path)
+            price_name = workbook["pricelevel"]["B2"].value
+            account_name = workbook["account"]["B2"].value
+
+        self.assertNotEqual(price_name, account_name)
+
+    def test_currency_amount_price_list_items_zero_percentage(self) -> None:
+        table = {
+            "logical_name": "productpricelevel",
+            "display_name": "Price List Item",
+            "primary_name_column": "productidname",
+            "entity_set_name": "productpricelevels",
+            "count": 1,
+            "columns": [
+                {
+                    "logical_name": "pricingmethodcode",
+                    "type": "Picklist",
+                    "options": [{"value": 1, "label": "Currency Amount"}],
+                },
+                {
+                    "logical_name": "percentage",
+                    "type": "Decimal",
+                    "role": "percentage",
+                    "min_value": 0,
+                    "max_value": 100,
+                },
+            ],
+            "lookups": [],
+            "context_rules": {},
+            "inclusion": {
+                "kind": "requested",
+                "dependency_path": ["productpricelevel"],
+                "reasons": [],
+            },
+        }
+        table["quality_profile"] = build_quality_profile(table)
+        spec = {
+            "name": "test",
+            "environment": "https://environment.invalid",
+            "run_id": "price-list-item",
+            "tables": [table],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "price-list-item.xlsx"
+            build_workbook(spec, path)
+            workbook = load_workbook(path)
+            worksheet = workbook["productpricelevel"]
+            headers = [cell.value for cell in worksheet[1]]
+
+            self.assertEqual(
+                0,
+                worksheet.cell(2, headers.index("percentage") + 1).value,
+            )
 
 
 class ProgressVisibilityTests(unittest.TestCase):

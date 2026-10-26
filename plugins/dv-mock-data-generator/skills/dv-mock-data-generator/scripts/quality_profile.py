@@ -21,9 +21,24 @@ def semantic_group(column: dict[str, Any]) -> str | None:
         return "person_profile"
     if role in {"employees", "revenue"}:
         return "organization_profile"
-    if role in {"product_name", "unit_price", "stock"}:
+    if role in {"product_name", "product_number", "unit_price", "stock"}:
         return "product_profile"
-    if role in {"order_name", "order_date", "line_number", "quantity", "money_total"}:
+    if role in {
+        "amount",
+        "budget",
+        "due_date",
+        "effort",
+        "end_date",
+        "estimated_amount",
+        "line_number",
+        "money_total",
+        "order_date",
+        "order_name",
+        "percentage",
+        "quantity",
+        "rounding_amount",
+        "start_date",
+    }:
         return "transaction_profile"
     if role == "description" or attr_type == "Memo" or any(
         token in name for token in ("description", "notes", "comment")

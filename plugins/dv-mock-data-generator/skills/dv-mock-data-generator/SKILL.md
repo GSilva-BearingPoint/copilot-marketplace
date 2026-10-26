@@ -33,6 +33,7 @@ one-line shorthand instead of a full sentence:
 
 ```
 testdata: <size|count> <table1>[,<table2>,...] [seed=<email>] [env=<name>]
+testdata: <size|count> solution=<unique-name> [seed=<email>] [env=<name>]
 ```
 
 Examples:
@@ -45,8 +46,9 @@ Parsing rules:
   session, then remember): **small = 25, medium = 250, large = 2500**. A bare integer is used as-is per table.
 - Remaining comma-separated tokens (until a `key=value`) are table logical names.
 - `seed=` sets/overrides the seed email for this run. `env=` overrides the active Dataverse environment.
-- The shorthand never bypasses startup checks, environment confirmation, dependency consent, workbook-path
-  confirmation, or final write approval.
+- `solution=` expands all table components from the live solution into one combined workbook.
+- The shorthand never bypasses startup checks, dependency consent, or final write approval. Missing setup
+  values are collected together rather than through a sequence of separate prompts.
 
 If the user writes a full natural-language request instead of the shorthand, extract the same fields from
 prose and proceed identically — do not require the shorthand syntax, just prefer suggesting it going
@@ -67,6 +69,12 @@ Do not inspect metadata, generate a workbook, or write records until **all** of 
 7. The workbook output path has been confirmed. Default to the current user's Desktop.
 8. The user has answered whether a repository containing Dataverse plugin/custom-process code should be used
    as generation context. The repository is optional; asking is mandatory.
+
+Collect prerequisites 2, 6, 7, 8, record counts, existing-record choices, and any already-known lookup
+target preferences in **one setup form** whenever the request does not already provide them. Do not ask
+separate connection, repository, path, count, and existing-record questions. If the request already
+contains every required value and selects the currently verified environment, proceed without a redundant
+setup prompt.
 
 Follow [`references/authentication-and-environment-selection.md`](references/authentication-and-environment-selection.md)
 and the official **dv-connect** skill. Service principals, client secrets, and certificates are not allowed
@@ -114,12 +122,12 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
      authentication fails, and complete after the exact delegated account/environment is confirmed.
    - Reuse only after explicit confirmation.
    - If change is requested (or no valid current connection exists), follow dv-connect's delegated
-     authentication and environment discovery. Return the environment list and wait for selection. Never
-     auto-select the active/default/first environment.
+     authentication and environment discovery. Return the environment list in the consolidated setup form.
+     Never auto-select the active/default/first environment.
 3. **Capture mandatory selection and email.** After the user chooses/confirms an environment and supplies the seed
    email, complete **dv-connect** for that exact environment. Its `dataverse auth who`,
    `dataverse org who`, `pac org who`, and `python scripts/auth.py --check` verification must all pass.
-4. **Ask for repository process context.** Ask: *"Is there a repository containing Dataverse plugin,
+4. **Capture repository process context in the consolidated setup form.** Ask whether there is a repository containing Dataverse plugin,
    workflow, custom API, web-resource, or process code that should guide the generated values and
    calculations?"* Offer **Use current repository**, **Provide another repository/path**, or **No repository
    context**.
@@ -131,10 +139,9 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
    - Convert confirmed findings to the safe declarative format in
      [`references/repository-process-context.md`](references/repository-process-context.md), show a short
      extracted-rule summary, and ask the user to confirm those rules before generation.
-5. **Confirm the workbook path.** Resolve the Windows known-folder Desktop and propose a filename such as
-   `testdata-contact-100-20261016-1225.xlsx`. Ask: **Use Desktop** or **Choose another folder**. Do not
-   generate the workbook until the destination is confirmed. `--output` may be omitted only after the user
-   accepts the Desktop default.
+5. **Confirm the workbook path in the same setup form.** Resolve the Windows known-folder Desktop and
+   propose a filename such as `testdata-contact-100-20261016-1225.xlsx`. Do not generate the workbook until
+   the destination is confirmed. `--output` may be omitted only after the user accepts the Desktop default.
 6. **Parse the data request** (shorthand or prose) into table list and per-table count. Environment and seed
    email always come from the verified dv-connect selection, never from defaults or unverified prompt text.
    - Treat repository context, workbook destination, seed email, table counts, and existing-record choices
@@ -143,7 +150,8 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
 7. **Discover schema & relationships live from the selected Power Apps environment** with
    `scripts/discover_testdata_workbook.py` — see
    [`references/schema-and-dependency-discovery.md`](references/schema-and-dependency-discovery.md):
-   required columns, attribute types, valid Picklist option values, alternate keys, and ManyToOne lookup
+   table/field descriptions, required columns, attribute types, valid local/global Picklist option values,
+   alternate keys, and ManyToOne lookup
    relationships to other tables (both other requested tables and tables outside the request). Never use a
    static/sample plan as the user's approval workbook. The environment is the source of metadata on every
    run, but generation logic must not contain environment-specific table, column, value, or record
@@ -153,14 +161,18 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
    fully generated implicit dependency. Record the source table, lookup, and dependency path and show them
    in the workbook and final summary. Required polymorphic lookups still require an explicit target. Optional
    lookups are filled when their target table was explicitly selected or a user-confirmed repository rule
-   selects a target present in live relationship metadata.
+   selects a    target present in live relationship metadata. Aggregate every unresolved polymorphic target and external
+   dependency into one decision form instead of failing and prompting one lookup at a time. Preserve optional
+   cyclic relationships as approved deferred updates; report required cycles together when they cannot be
+   satisfied safely.
 9. **Generate records in memory only** (no writes yet) using the schema-driven `fake()` dispatch pattern
    from dv-data's sample-data-generation reference, extended with:
    - Picklist/Status columns get a value randomly chosen from the **actual** valid OptionSet values (never
      a placeholder `1`).
    - Metadata-declared email columns get a **seed-based alias** — see
      [`references/email-aliasing-and-safety.md`](references/email-aliasing-and-safety.md).
-   - Contact/person tables get deterministic human first and last names. Other name/title fields use
+   - Contact/person tables get deterministic human first and last names. Product tables get coherent
+     product names, variants, product numbers, descriptions, prices, and URLs. Other name/title fields use
      readable organization, project, or role names; never emit generic `Test First Name 1`-style labels.
      Name values are loaded from `references/seed-names/*.txt` by `scripts/seed_name_loader.py`, including
      middle names when the table exposes a middle-name column.
@@ -170,6 +182,9 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
      composite keys by tuple, adjusting a writable string component when needed.
    - Apply user-confirmed repository defaults, allowed values, templates, and safe calculations before the
      workbook is rendered.
+   - Use live descriptions, labels, types, formats, relationships, and choice labels to infer semantics.
+     Generate coherent row-level values rather than independently reusing one organization name across
+     unrelated fields.
    - Build and satisfy a metadata-driven quality profile for each table: all writable required fields and
      the primary name, plus representative semantic groups such as contactability, address, descriptive,
      product, transaction, organization, or relationship data. Do not select every unknown custom column by
@@ -203,14 +218,17 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
      completeness statistics, warnings, and whether relationships use generated or existing records.
    - End with a direct approval question, e.g.: *"Create these 275 records (25 accounts, 250 contacts)
      in `contoso-dev`? (yes / no / adjust)"*
-12. **Hard stop for approval.** Do **not** call any create/upsert operation until the user replies with an
+12. **One hard stop for approval.** Do **not** call any create/upsert operation until the user replies with an
    explicit affirmative (`yes`, `go`, `approve`, etc.). `no`/edits go back to step 4 with adjustments. This
-   gate applies on every run, including repeat invocations later in the same session — approval is never
-   assumed from a prior run.
+   gate applies once to the combined workbook for every run, including repeat invocations later in the same
+   session. Never split a solution or multi-table request into separately approved workbooks merely to work
+   around lookup ambiguity; collect the decisions and regenerate one workbook.
 13. **Commit in dependency order** with `scripts/apply_testdata_workbook.py --approved YES` — parent tables
    first (parallel across tables at the same level per
    dv-data's multi-table-fk-import pattern), building source-index -> GUID maps, then child tables bound via
-   `@odata.bind`. Use `CreateMultiple`/adaptive chunking for counts >= 10.
+   `@odata.bind`. Probe with the single-record SDK path. Use `CreateMultiple` for supported tables and fall
+   back only on the explicit unsupported-operation response. Persist every created row for partial resume,
+   apply approved lifecycle actions before dependents, then apply deferred cyclic lookups.
 14. **Write a manifest** of every created record (table + GUID) for easy rollback — see
    [`references/approval-and-rollback.md`](references/approval-and-rollback.md). Print the manifest path
    and a summary (counts per table + environment URL to view the records).
@@ -218,6 +236,8 @@ provide steps 2 and 3 because those are conversational; the local scripts provid
 ## Hard rules
 
 - Never create/update/delete a record before the user has explicitly approved the previewed dry run.
+- Never request separate write approvals for subsets of one requested solution/run. Produce one combined
+  approval artifact unless a Dataverse rule discovered after approval requires values or actions to change.
 - Never install a dependency without a separate, explicit installation consent response.
 - Never replace or change a valid current user/environment without first asking whether to reuse it.
 - Never skip the repository-context question, and never execute untrusted repository code while extracting
@@ -260,7 +280,8 @@ python scripts\check_dependencies.py --json
 # 6. After connection, seed email, repository context, and destination are confirmed:
 python scripts\discover_testdata_workbook.py `
   --environment-url https://selected.crm.dynamics.com `
-  --seed-email user@contoso.com --tables account,contact --size small `
+  --seed-email user@contoso.com --solution ContosoDemo --size small `
+  --lookup-targets lead.customerid=account,opportunity.customerid=account `
   --context-rules context-rules.json `
   --output "$HOME\Desktop\suggested-test-data.xlsx" --plan-output testdata-plan.json
 

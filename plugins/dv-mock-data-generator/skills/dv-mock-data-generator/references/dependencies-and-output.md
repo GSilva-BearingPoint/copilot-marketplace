@@ -16,16 +16,17 @@ Never infer installation consent from a `testdata:` request.
 
 ## Workbook destination
 
-Resolve the current user's Windows Desktop known folder and propose a timestamped filename. Ask whether to
-use that path or choose another folder before generating the workbook.
+Resolve the current user's Windows Desktop known folder and propose a timestamped filename. Collect the
+destination in the same setup form as connection reuse/change, seed email, counts, repository context,
+existing-record policy, and any known polymorphic lookup targets.
 
-`discover_testdata_workbook.py` defaults to Desktop when `--output` is omitted, but the agent must still ask
-the user first. The default exists for script safety/convenience, not to bypass confirmation.
+`discover_testdata_workbook.py` defaults to Desktop when `--output` is omitted. If the request already
+provides every mandatory setup value, do not ask a redundant form.
 
 ## Repository process context
 
-Before confirming the output path, ask whether plugin/custom-process repository context should be used.
-See `repository-process-context.md`. This question is mandatory, but providing a repository is optional.
+In the consolidated setup form, ask whether plugin/custom-process repository context should be used. See
+`repository-process-context.md`. This decision is mandatory, but providing a repository is optional.
 
 ## Approval summary
 
@@ -40,7 +41,8 @@ The summary must also show:
 - Whether each relationship uses records generated in this run or explicitly selected existing records.
 - Per-table meaningful-field completeness statistics.
 - Three complete sample rows per table, including lookup keys and email aliases.
-- Discovery warnings and skipped optional relationships.
+- Discovery warnings, deferred optional relationships, existing-record samples, and approved lifecycle
+  actions.
 
 The first summary line must mark step 7 as `WAITING` and explain that no writes can happen until the user
 approves this exact validated workbook. If the workbook is edited, return to step 6 and explain why

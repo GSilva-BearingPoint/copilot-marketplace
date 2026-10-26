@@ -12,7 +12,7 @@
         {
             "name": "dv-mock-data-generator",
             "description": "Copilot CLI skill that generates realistic, schema-aware mock data for Microsoft Dataverse tables. It respects required fields, choice values and FK order. It previews the data as an editable Excel workbook and writes only after explicit approval, with a rollback manifest.",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "author": {
                 "name": "Gonçalo Silva",
                 "email": "goncalo.silva@bearingpoint.com"

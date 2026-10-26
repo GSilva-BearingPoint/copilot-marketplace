@@ -113,10 +113,24 @@ def website(index: int, run_id: str) -> str:
     return f"https://www.{base.casefold()}.example"
 
 
-def classify(logical_name: str, attr_type: str | None, fmt: str | None = None) -> str | None:
+def classify(
+    logical_name: str,
+    attr_type: str | None,
+    fmt: str | None = None,
+    *,
+    description: str = "",
+    label: str = "",
+) -> str | None:
     """Maps a column's metadata to a semantic role, or None when it has no organic generator."""
     name = (logical_name or "").casefold()
     fmt = (fmt or "").casefold()
+    meaning = " ".join((name, label.casefold(), description.casefold()))
+    name_label = " ".join((name, label.casefold()))
+    if attr_type in {"String", "Memo"} and re.search(
+        r"description|notes|comment|details|summary|explanation",
+        meaning,
+    ):
+        return "description"
     if attr_type == "String":
         if re.search(r"(?:^|_)(?:first|given)name$", name):
             return "person_first_name"
@@ -139,8 +153,6 @@ def classify(logical_name: str, attr_type: str | None, fmt: str | None = None) -
             return "job_title"
         if re.search(r"(?:^|_)department$", name):
             return "department"
-        if re.search(r"description|notes|comment", name):
-            return "description"
     if attr_type == "DateTime" and re.search(r"birthdate|dateofbirth|birth_date", name):
         return "birthdate"
     if attr_type == "DateTime" and re.search(r"(?:^|_)orderdate$", name):
@@ -148,6 +160,8 @@ def classify(logical_name: str, attr_type: str | None, fmt: str | None = None) -
     if attr_type == "String":
         if re.search(r"(?:^|_)productname$", name):
             return "product_name"
+        if re.search(r"product (?:number|code|sku)|(?:^|_)product(?:number|code|sku)$", meaning):
+            return "product_number"
         if re.search(r"(?:^|_)ordername$", name):
             return "order_name"
         if re.search(r"(?:^|_)line(?:item)?(?:number|no)$", name):
@@ -155,13 +169,29 @@ def classify(logical_name: str, attr_type: str | None, fmt: str | None = None) -
     if attr_type in {"Money", "Decimal", "Double"}:
         if re.search(r"(?:^|_)(?:unit)?price$", name):
             return "unit_price"
+        if re.search(r"budget", meaning):
+            return "budget"
+        if "rounding" in name_label and "amount" in name_label:
+            return "rounding_amount"
+        if re.search(r"estimated|actual", name_label) and "amount" in name_label:
+            return "estimated_amount"
+        if re.search(r"(?:^|_)(?:line|extended|discount|estimated|actual)?(?:total)?amount$", name):
+            return "amount"
+        if re.search(r"percentage|percent|margin|rate", name_label):
+            return "percentage"
+        if re.search(r"\b(effort|hours?)\b", meaning):
+            return "effort"
         if re.search(r"(?:^|_)(?:grand)?total(?:cost|amount)?$", name):
             return "money_total"
-    if attr_type in {"Integer", "BigInt"}:
+    if attr_type in {"Integer", "BigInt", "Decimal", "Double"}:
         if re.search(r"stockquantity|quantityonhand|(?:^|_)stock$", name):
             return "stock"
         if re.search(r"(?:^|_)quantity$", name):
             return "quantity"
+        if re.search(r"\b(effort|hours?|duration)\b", meaning):
+            return "effort"
+        if re.search(r"percentage|percent|score|probability", name_label):
+            return "percentage"
     if attr_type == "Boolean" and re.search(r"(?:^|_)isactive$", name):
         return "active_flag"
     if attr_type in {"Integer", "BigInt", "Decimal", "Double"} and re.search(
@@ -170,7 +200,125 @@ def classify(logical_name: str, attr_type: str | None, fmt: str | None = None) -
         return "employees"
     if attr_type in {"Money", "Decimal", "Double"} and re.search(r"(?:^|_)(annual)?revenue$", name):
         return "revenue"
+    if attr_type == "DateTime":
+        if re.search(r"start|begin|effective from", meaning):
+            return "start_date"
+        if re.search(r"due|deadline", meaning):
+            return "due_date"
+        if re.search(r"end|completion|finish|expiry|expiration", meaning):
+            return "end_date"
     return None
+
+
+def table_kind(table: dict[str, Any]) -> str:
+    columns = table.get("columns", [])
+    text = " ".join(
+        (
+            str(table.get("logical_name") or ""),
+            str(table.get("display_name") or ""),
+            str(table.get("description") or ""),
+        )
+    ).casefold()
+    logical_name = str(table.get("logical_name") or "").casefold()
+    column_names = {str(column.get("logical_name") or "").casefold() for column in columns}
+    if logical_name == "productpricelevel":
+        return "price_list_item"
+    if logical_name == "opportunityproduct":
+        return "line_item"
+    if logical_name == "product" or "productnumber" in column_names:
+        return "product"
+    if logical_name == "pricelevel":
+        return "price_list"
+    if logical_name == "account":
+        return "organization"
+    if logical_name == "contact":
+        return "person"
+    if logical_name == "lead":
+        return "lead"
+    if logical_name == "opportunity":
+        return "opportunity"
+    if logical_name in {"task", "appointment", "phonecall"}:
+        return "activity"
+    if "requirement" in logical_name or "requirement" in text:
+        return "requirement"
+    if "stakeholder" in logical_name or "stakeholder" in text:
+        return "stakeholder"
+    if "project" in logical_name or "project" in text:
+        return "project"
+    if "sales opportunity" in text:
+        return "opportunity"
+    if "sales lead" in text:
+        return "lead"
+    if "activity" in text:
+        return "activity"
+    if {"firstname", "lastname"}.intersection(column_names):
+        return "person"
+    if "price list" in text:
+        return "price_list"
+    if "organization" in text or "company" in text:
+        return "organization"
+    return "generic"
+
+
+def row_context(table: dict[str, Any], index: int, run_id: str) -> dict[str, Any]:
+    kind = table_kind(table)
+    organization = org_name(index, run_id)
+    base, variant = product(index, run_id)
+    product_name = f"{base} {variant}"
+    sector = pick(_lines("company-sectors.txt"), index, run_id, "context-sector")
+    rng = _rng(run_id, str(table.get("logical_name") or ""), index, "row-context")
+    project_types = (
+        "Cloud Migration",
+        "Customer Service Modernization",
+        "Data Platform Assessment",
+        "ERP Integration",
+        "Sales Automation",
+        "Security Review",
+    )
+    project_name = f"{pick(project_types, index, run_id, 'project-type')} for {organization}"
+    start_date = dt.date.today() + dt.timedelta(days=rng.randint(1, 30))
+    end_date = start_date + dt.timedelta(days=rng.randint(45, 240))
+    descriptions = {
+        "product": (
+            f"{product_name} is designed for {sector.casefold()} teams that need reliable "
+            "day-to-day operation, straightforward deployment, and predictable maintenance."
+        ),
+        "price_list": f"Standard commercial pricing for {sector.casefold()} products and services.",
+        "price_list_item": f"Approved unit pricing for {product_name}.",
+        "line_item": f"{product_name} selected for the proposed customer solution.",
+        "project": (
+            f"{project_name} defines the expected scope, delivery outcomes, dependencies, "
+            "and target completion window."
+        ),
+        "requirement": (
+            f"Deliver a measurable capability for {project_name}, with clear acceptance criteria "
+            "and an accountable owner."
+        ),
+        "stakeholder": f"Stakeholder supporting decisions and delivery for {project_name}.",
+        "opportunity": f"Sales opportunity for {project_name}.",
+        "lead": f"Prospective customer interest in {project_name}.",
+        "activity": f"Follow-up activity for {project_name}.",
+        "organization": f"{organization} operates in the {sector.casefold()} sector.",
+        "person": f"Business contact associated with {organization}.",
+        "generic": f"Representative {table.get('display_name') or table.get('logical_name')} record.",
+    }
+    product_slug = re.sub(r"[^a-z0-9]+", "-", product_name.casefold()).strip("-")
+    return {
+        "kind": kind,
+        "organization_name": organization,
+        "product_name": product_name,
+        "product_number": f"PRD-{100000 + _hash(run_id, 'product-number') % 800000 + index}",
+        "project_name": project_name,
+        "description": descriptions[kind],
+        "start_date": start_date,
+        "end_date": end_date,
+        "due_date": start_date + dt.timedelta(days=rng.randint(30, 180)),
+        "website": (
+            f"https://catalog.example.com/products/{product_slug}"
+            if kind == "product"
+            else website(index, run_id)
+        ),
+    }
 
 
 def select_organic(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -208,7 +356,15 @@ def _clamp(value: float, column: dict[str, Any]) -> float:
     return value
 
 
-def generate(role: str, column: dict[str, Any], table: str, index: int, run_id: str) -> Any | None:
+def generate(
+    role: str,
+    column: dict[str, Any],
+    table: str,
+    index: int,
+    run_id: str,
+    context: dict[str, Any] | None = None,
+) -> Any | None:
+    context = context or {}
     loc = location(index, run_id)
     rng = _rng(run_id, table, index, role)
     if role == "addr_line1":
@@ -232,7 +388,7 @@ def generate(role: str, column: dict[str, Any], table: str, index: int, run_id: 
         pattern = loc["mobile" if role == MOBILE_ROLE else "landline"]
         return _mask(pattern, _rng(run_id, table, index, column["logical_name"]))
     if role == "url":
-        return website(index, run_id)
+        return context.get("website") or website(index, run_id)
     if role == "job_title":
         return pick(_lines("job-titles.txt"), index, run_id, "job")
     if role == "department":
@@ -245,8 +401,11 @@ def generate(role: str, column: dict[str, Any], table: str, index: int, run_id: 
         value = rng.choice((250_000, 750_000, 1_500_000, 4_000_000, 12_000_000, 40_000_000))
         return round(_clamp(float(value), column), 2)
     if role == "product_name":
-        base, variant = product(index, run_id)
-        return f"{base} {variant}"
+        return context.get("product_name") or " ".join(product(index, run_id))
+    if role == "product_number":
+        return context.get("product_number")
+    if role == "description":
+        return context.get("description")
     if role == "unit_price":
         price = rng.choice((9, 15, 25, 40, 55, 80, 120, 175, 250, 400, 650))
         return float(_clamp(price, column))
@@ -257,11 +416,39 @@ def generate(role: str, column: dict[str, Any], table: str, index: int, run_id: 
         day = dt.date.today() - dt.timedelta(days=rng.randint(0, 365))
         return day.isoformat()
     if role == "quantity":
-        return int(_clamp(rng.choice((1, 1, 2, 2, 3, 4, 5, 6, 8, 10, 12, 20)), column))
+        value = _clamp(rng.choice((1, 1, 2, 2, 3, 4, 5, 6, 8, 10, 12, 20)), column)
+        return int(value) if column.get("type") in {"Integer", "BigInt"} else round(value, 2)
     if role == "stock":
         return int(_clamp(rng.choice((0, 5, 12, 25, 40, 75, 120, 250, 400, 500)), column))
     if role == "active_flag":
         return rng.random() < 0.9
     if role == "money_total":
         return float(_clamp(rng.randint(50, 5000), column))
+    if role == "amount":
+        return round(_clamp(float(rng.choice((25, 50, 100, 250, 500, 1000, 2500, 5000))), column), 2)
+    if role == "estimated_amount":
+        return round(
+            _clamp(float(rng.choice((10_000, 25_000, 50_000, 100_000, 250_000, 500_000))), column),
+            2,
+        )
+    if role == "rounding_amount":
+        return round(_clamp(float(rng.choice((0.01, 0.05, 0.1, 0.5, 1.0))), column), 2)
+    if role == "budget":
+        return round(
+            _clamp(float(rng.choice((10_000, 25_000, 50_000, 100_000, 250_000, 500_000))), column),
+            2,
+        )
+    if role == "effort":
+        value = _clamp(float(rng.choice((1, 2, 3, 5, 8, 13, 21, 34, 40))), column)
+        return int(value) if column.get("type") in {"Integer", "BigInt"} else round(value, 2)
+    if role == "percentage":
+        value = _clamp(float(rng.choice((0, 5, 10, 15, 20, 25, 50, 75, 90))), column)
+        return int(value) if column.get("type") in {"Integer", "BigInt"} else round(value, 2)
+    if role in {"start_date", "due_date", "end_date"}:
+        value = context.get(role)
+        if value is None:
+            return None
+        if column.get("format") == "DateOnly":
+            return value.isoformat()
+        return f"{value.isoformat()}T09:00:00Z"
     return None

@@ -3,8 +3,7 @@
 Rules are inferred from live column names/types, so they only apply when the pattern exists:
 * child amount  = child quantity x parent unit price   (child has a lookup to the priced parent)
 * parent total  = sum of the child amounts pointing at it
-* child date / parent-name = parent value when the child repeats that DateTime column or the parent's
-  primary name column (e.g. orderdate, ordername)
+* child date = parent value when the child repeats that DateTime column (e.g. orderdate)
 """
 from __future__ import annotations
 
@@ -30,6 +29,10 @@ def derive_values(
     money = {"Money", "Decimal", "Double"}
     child_amounts: dict[str, list[tuple[str, str, str]]] = {}
 
+    for row in records.get("productpricelevel", []):
+        if row.get("pricingmethodcode") == 1 and "percentage" in row:
+            row["percentage"] = 0
+
     for child in order:
         table = tables[child]
         quantity = _column(table, {"Integer", "BigInt"}, r"(?:^|_)quantity$")
@@ -46,10 +49,11 @@ def derive_values(
                     continue
                 if quantity and amount and price and quantity in row and price in target:
                     row[amount] = round(row[quantity] * target[price], 2)
+                elif amount and price and price in target:
+                    row[amount] = round(float(target[price]), 2)
                 for column in table.get("columns", []):
                     name = column["logical_name"]
-                    is_parent_name = name == ptable.get("primary_name_column")
-                    if (column.get("type") == "DateTime" or is_parent_name) and name in target:
+                    if column.get("type") == "DateTime" and name in target:
                         row[name] = target[name]
             if amount:
                 child_amounts.setdefault(parent, []).append((child, lookup["column"], amount))

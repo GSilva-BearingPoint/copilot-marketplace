@@ -107,7 +107,15 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
     summary.append(["Approval status", "NOT APPROVED - workbook is a preview only"])
     summary.append([])
     summary.append(
-        ["Creation order", "Table", "Suggested records", "Worksheet", "Source", "Reason"]
+        [
+            "Creation order",
+            "Table",
+            "Suggested records",
+            "Worksheet",
+            "Source",
+            "Reason",
+            "Description",
+        ]
     )
 
     used_sheet_names = {"readme", "_metadata"}
@@ -126,6 +134,7 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
                 sheet_by_table[name],
                 inclusion.get("kind", "requested"),
                 _inclusion_reason(table),
+                table.get("description") or "",
             ]
         )
     implicit_tables = [
@@ -144,6 +153,37 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
         summary.append(["Warnings requiring review"])
         for warning in warnings:
             summary.append([warning])
+    post_create_actions = [
+        (name, action)
+        for name in order
+        for action in by_name[name].get("post_create_actions", [])
+    ]
+    if post_create_actions:
+        summary.append([])
+        summary.append(["Approved post-create actions"])
+        for name, action in post_create_actions:
+            summary.append([name, action.get("description") or action.get("kind")])
+    existing_dependencies = [
+        (name, lookup)
+        for name in order
+        for lookup in by_name[name].get("lookups", [])
+        if lookup.get("existing_records")
+    ]
+    if existing_dependencies:
+        summary.append([])
+        summary.append(["Existing-record dependencies"])
+        for name, lookup in existing_dependencies:
+            sample = ", ".join(
+                f"{item['label']} ({item['id']})"
+                for item in lookup["existing_records"][:5]
+            )
+            summary.append(
+                [
+                    f"{name}.{lookup['column']} -> {lookup['target_table']}",
+                    f"{len(lookup['existing_records'])} selectable record(s)",
+                    sample,
+                ]
+            )
     summary.freeze_panes = "A9"
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 42
@@ -164,12 +204,16 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
     })
 
     key_cells: dict[str, dict[str, str]] = {}
+    worksheet_by_table = {}
+    columns_by_table: dict[str, list[str]] = {}
     for name in order:
         table = by_name[name]
         worksheet = workbook.create_sheet(sheet_by_table[name])
+        worksheet_by_table[name] = worksheet
         columns = [INTERNAL_KEY]
         columns.extend(column["logical_name"] for column in table.get("columns", []))
         columns.extend(lookup["column"] for lookup in table.get("lookups", []))
+        columns_by_table[name] = columns
         worksheet.append(columns)
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}1"
@@ -184,29 +228,23 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
                 cell.fill = LOOKUP_FILL
                 cell.font = Font(color="000000", bold=True)
                 target = lookup_metadata[cell.value]["target_table"]
-                cell.comment = Comment(f"Lookup to {target}; cells link to the related sheet row.", "Copilot")
+                detail = f"Lookup to {target}; cells link to the related sheet row."
+                if lookup_metadata[cell.value].get("deferred"):
+                    detail += " This relationship is applied after both cyclic records are created."
+                cell.comment = Comment(detail, "Copilot")
             elif column_metadata.get(cell.value, {}).get("required"):
                 cell.fill = REQUIRED_FILL
                 cell.font = Font(color="000000", bold=True)
+            column = column_metadata.get(cell.value)
+            if column and column.get("description"):
+                prefix = "Required. " if column.get("required") else ""
+                cell.comment = Comment(prefix + column["description"], "Copilot")
 
         records = records_by_table[name]
         key_cells[name] = {}
         for row_number, record in enumerate(records, start=2):
             worksheet.append([record.get(column) for column in columns])
             key_cells[name][record[INTERNAL_KEY]] = f"A{row_number}"
-
-        for lookup in table.get("lookups", []):
-            target_name = lookup["target_table"]
-            if lookup.get("existing_ids") or not records_by_table.get(target_name):
-                continue
-            column_number = columns.index(lookup["column"]) + 1
-            for index, record in enumerate(records):
-                target_key = record[lookup["column"]]
-                cell = worksheet.cell(row=index + 2, column=column_number)
-                target_cell = key_cells[target_name][target_key]
-                target_sheet = sheet_by_table[target_name].replace("'", "''")
-                cell.hyperlink = f"#'{target_sheet}'!{target_cell}"
-                cell.style = "Hyperlink"
 
         for column_number, column_name in enumerate(columns, start=1):
             column = column_metadata.get(column_name)
@@ -234,6 +272,24 @@ def build_workbook(spec: dict[str, Any], output_path: Path) -> None:
             **table,
             "sheet_name": sheet_by_table[name],
         })
+
+    for name in order:
+        table = by_name[name]
+        worksheet = worksheet_by_table[name]
+        columns = columns_by_table[name]
+        records = records_by_table[name]
+        for lookup in table.get("lookups", []):
+            target_name = lookup["target_table"]
+            if lookup.get("existing_ids") or not records_by_table.get(target_name):
+                continue
+            column_number = columns.index(lookup["column"]) + 1
+            for index, record in enumerate(records):
+                target_key = record[lookup["column"]]
+                cell = worksheet.cell(row=index + 2, column=column_number)
+                target_cell = key_cells[target_name][target_key]
+                target_sheet = sheet_by_table[target_name].replace("'", "''")
+                cell.hyperlink = f"#'{target_sheet}'!{target_cell}"
+                cell.style = "Hyperlink"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output_path)
